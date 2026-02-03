@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+
+# Virtualenv
+.venv/
+
+# Backend data
+backend/app.db
+backend/.env
+
+# Node
+node_modules/
+
+# Build
+webapp/dist/
+
+# IDE
+.idea/
+.vscode/
