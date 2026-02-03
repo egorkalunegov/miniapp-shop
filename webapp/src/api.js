@@ -11,13 +11,14 @@ function buildUrl(path) {
 
 
 function ngrokHeaders(extra = {}) {
-  return { "ngrok-skip-browser-warning": "1", ...extra };
+  return { "ngrok-skip-browser-warning": "1", Accept: "application/json", ...extra };
 }
 
 export async function createOrder(payload) {
   const r = await fetch(buildUrl("/api/orders"), {
     method: "POST",
     headers: ngrokHeaders({ "Content-Type": "application/json" }),
+    cache: "no-store",
     body: JSON.stringify(payload),
   });
   if (!r.ok) throw new Error(await r.text());
@@ -27,6 +28,7 @@ export async function createOrder(payload) {
 export async function getInventory() {
   const r = await fetch(buildUrl("/api/inventory"), {
     headers: ngrokHeaders(),
+    cache: "no-store",
   });
   if (!r.ok) throw new Error(await r.text());
   return await r.json();
@@ -40,6 +42,7 @@ export async function updateInventory(authBasic, items) {
       Authorization: `Basic ${authBasic}`,
       ...ngrokHeaders(),
     },
+    cache: "no-store",
     body: JSON.stringify({ items }),
   });
   if (!r.ok) throw new Error(await r.text());
