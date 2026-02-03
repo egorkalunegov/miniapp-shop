@@ -34,6 +34,15 @@ export async function getInventory() {
   return await r.json();
 }
 
+export async function getProducts() {
+  const r = await fetch(buildUrl("/api/products"), {
+    headers: ngrokHeaders(),
+    cache: "no-store",
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return await r.json();
+}
+
 export async function updateInventory(authBasic, items) {
   const r = await fetch(buildUrl("/api/inventory"), {
     method: "PATCH",
@@ -44,6 +53,19 @@ export async function updateInventory(authBasic, items) {
     },
     cache: "no-store",
     body: JSON.stringify({ items }),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return await r.json();
+}
+
+export async function syncLeadteh(authBasic) {
+  const r = await fetch(buildUrl("/api/leadteh/sync"), {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${authBasic}`,
+      ...ngrokHeaders(),
+    },
+    cache: "no-store",
   });
   if (!r.ok) throw new Error(await r.text());
   return await r.json();

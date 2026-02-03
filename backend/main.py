@@ -6,6 +6,7 @@ import sqlite3
 import uuid
 import re
 import asyncio
+import time
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -25,22 +26,115 @@ ADMIN_USER = os.getenv("ADMIN_USER", "").strip()
 ADMIN_PASS = os.getenv("ADMIN_PASS", "").strip()
 LEADTEH_API_TOKEN = os.getenv("LEADTEH_API_TOKEN", "").strip()
 LEADTEH_BOT_ID = os.getenv("LEADTEH_BOT_ID", "").strip()
+LEADTEH_PRODUCTS_SCHEMA_ID = os.getenv("LEADTEH_PRODUCTS_SCHEMA_ID", "").strip()
 
 if PRODAMUS_FORM_URL and not PRODAMUS_FORM_URL.endswith("/"):
     PRODAMUS_FORM_URL += "/"
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "app.db")
 
-# ---- каталог (источник правды по цене) ----
-CATALOG = {
-    "GIFT_BOX_LOVED": {"name": "Подарочный бокс «Это любят Люди»", "price": 4700},
-    "DUBAI_CHOCO": {"name": "Дубайский шоколад", "price": 1600},
-    "KARTOSHKA": {"name": "Пирожное «Картошка»", "price": 1000},
-    "CHOCO_RASPBERRY_NUTS": {"name": "Шоколад с орехом и малиной", "price": 600},
-    "ASSORTI_HEART": {"name": "Шоколад конфеты ассорти «В самое сердце»", "price": 1000},
-    "CHOCO_ORESHEK": {"name": "Шоколад конфеты «Орешек»", "price": 1100},
-    "CHOCO_ORESHEK_CARAMEL_COOKIE": {"name": "Шоколад конфеты «Орешек с карамелью и миндальным печеньем»", "price": 1300},
-}
+# ---- сиды каталога (пока Leadteh не настроен) ----
+SEED_PRODUCTS = [
+    {
+        "sku": "GIFT_BOX_LOVED",
+        "name": "Подарочный бокс «Это любят Люди»",
+        "price": 4700,
+        "weight": "",
+        "shelf_life": "",
+        "badge": "ХИТ продаж!",
+        "image_url": "/products/box.jpg",
+        "description": (
+            "1. Дубайский шоколад — 1 шт.\n"
+            "2. Пирожное «Картошка» — 1 шт.\n"
+            "3. Набор конфет ассорти «В самое сердце» — 1 шт.\n"
+            "4. Конфеты «Орешек» — 1 шт.\n"
+            "Бонус: плитка шоколада — 1 шт."
+        ),
+        "sort": 1,
+        "active": 1,
+    },
+    {
+        "sku": "DUBAI_CHOCO",
+        "name": "ДУБАЙСКИЙ ШОКОЛАД",
+        "price": 1600,
+        "weight": "180 г",
+        "shelf_life": "30 суток",
+        "badge": "",
+        "image_url": "/products/dubai-chocolate.jpg",
+        "description": (
+            "Состав: Молочный бельгийский шоколад Callebaut, фисташковая паста 100%, "
+            "тесто катаифи Bontier, масло сливочное 82,5%."
+        ),
+        "sort": 2,
+        "active": 1,
+    },
+    {
+        "sku": "ASSORTI_HEART",
+        "name": "Шоколад конфеты ассорти «В самое сердце»",
+        "price": 1000,
+        "weight": "120 г",
+        "shelf_life": "90 суток",
+        "badge": "",
+        "image_url": "/products/serdce.jpg",
+        "description": (
+            "Молочный, белый, апельсиновый, темный бельгийский шоколад Callebaut, "
+            "сублимированная малина, орех (миндаль, кешью)."
+        ),
+        "sort": 3,
+        "active": 1,
+    },
+    {
+        "sku": "CHOCO_ORESHEK",
+        "name": "Шоколад конфеты «Орешек»",
+        "price": 1100,
+        "weight": "120 г",
+        "shelf_life": "90 суток",
+        "badge": "",
+        "image_url": "/products/oreshek.jpg",
+        "description": (
+            "Карамельный бельгийский шоколад Callebaut, взрывная карамель, "
+            "орех (миндаль, кешью)."
+        ),
+        "sort": 4,
+        "active": 1,
+    },
+    {
+        "sku": "KARTOSHKA",
+        "name": "Пирожное «Картошка»",
+        "price": 1000,
+        "weight": "350 г",
+        "shelf_life": "10 суток",
+        "badge": "",
+        "image_url": "/products/kartoshka.jpg",
+        "description": "Состав: Молочный бельгийский шоколад Callebaut, шоколадный бисквит.",
+        "sort": 5,
+        "active": 1,
+    },
+    {
+        "sku": "CHOCO_RASPBERRY_NUTS",
+        "name": "Шоколад с орехом и малиной",
+        "price": 600,
+        "weight": "120 г",
+        "shelf_life": "120 суток",
+        "badge": "",
+        "image_url": "/products/malina.jpg",
+        "description": "Молочный бельгийский шоколад Callebaut.\nОрех: миндаль, кешью.\nСублимированная малина.",
+        "sort": 6,
+        "active": 1,
+    },
+    {
+        "sku": "CHOCO_ORESHEK_CARAMEL_COOKIE",
+        "name": "Шоколад конфеты «Орешек с карамелью и миндальным печеньем»",
+        "price": 1300,
+        "weight": "130 г",
+        "shelf_life": "90 суток",
+        "badge": "",
+        "image_url": "/products/caramel.jpg",
+        "description": "Молочный бельгийский шоколад Callebaut, карамель, миндальное печенье.",
+        "sort": 7,
+        "active": 1,
+    },
+]
 
 
 # ---------------------------
@@ -97,14 +191,57 @@ def init_db() -> None:
       qty INTEGER NOT NULL
     )
     """)
-    # стартовые товары (создадутся один раз)
-    for sku, meta in CATALOG.items():
+    con.commit()
+    con.close()
+    ensure_inventory_columns()
+    seed_products()
+    return
+
+def ensure_inventory_columns() -> None:
+    con = db()
+    cur = con.cursor()
+    cols = {r["name"] for r in cur.execute("PRAGMA table_info(inventory)")}
+
+    def add_col(name: str, col_type: str, default_sql: str) -> None:
+        if name in cols:
+            return
+        cur.execute(f"ALTER TABLE inventory ADD COLUMN {name} {col_type} DEFAULT {default_sql}")
+
+    add_col("price", "INTEGER", "0")
+    add_col("weight", "TEXT", "''")
+    add_col("shelf_life", "TEXT", "''")
+    add_col("description", "TEXT", "''")
+    add_col("image_url", "TEXT", "''")
+    add_col("badge", "TEXT", "''")
+    add_col("sort", "INTEGER", "0")
+    add_col("active", "INTEGER", "1")
+
+    con.commit()
+    con.close()
+
+
+def seed_products() -> None:
+    con = db()
+    cur = con.cursor()
+    for p in SEED_PRODUCTS:
         cur.execute(
             """
-            INSERT OR IGNORE INTO inventory (sku, name, stock, reserved)
-            VALUES (?, ?, 0, 0)
+            INSERT OR IGNORE INTO inventory
+            (sku, name, stock, reserved, price, weight, shelf_life, description, image_url, badge, sort, active)
+            VALUES (?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (sku, meta["name"]),
+            (
+                p["sku"],
+                p["name"],
+                int(p.get("price") or 0),
+                p.get("weight") or "",
+                p.get("shelf_life") or "",
+                p.get("description") or "",
+                p.get("image_url") or "",
+                p.get("badge") or "",
+                int(p.get("sort") or 0),
+                int(p.get("active") or 0),
+            ),
         )
     con.commit()
     con.close()
@@ -274,12 +411,167 @@ def get_order_payload(order_id: str) -> Optional[dict]:
     return payload
 
 
+def get_product_name_map(skus: list[str]) -> dict[str, str]:
+    if not skus:
+        return {}
+    con = db()
+    placeholders = ",".join("?" for _ in skus)
+    rows = con.execute(
+        f"SELECT sku, name FROM inventory WHERE sku IN ({placeholders})",
+        skus,
+    ).fetchall()
+    con.close()
+    return {r["sku"]: r["name"] for r in rows}
+
+
 def _leadteh_enabled() -> bool:
     return bool(LEADTEH_API_TOKEN and LEADTEH_BOT_ID)
 
 
-async def _leadteh_set_variable(client: httpx.AsyncClient, contact_id: int, name: str, value: str) -> None:
-    await client.post(
+def _leadteh_products_enabled() -> bool:
+    return bool(LEADTEH_API_TOKEN and LEADTEH_PRODUCTS_SCHEMA_ID)
+
+
+def _leadteh_request(client: httpx.Client, url: str, data: dict) -> dict:
+    r = client.post(
+        url,
+        params={"api_token": LEADTEH_API_TOKEN},
+        data=data,
+        headers={"X-Requested-With": "XMLHttpRequest"},
+        timeout=20,
+    )
+    try:
+        return r.json()
+    except Exception:
+        return {"_status": r.status_code, "_text": r.text}
+
+
+def _leadteh_get_list_items(schema_id: str) -> list[dict]:
+    items: list[dict] = []
+    if not schema_id:
+        return items
+    with httpx.Client() as client:
+        page = 1
+        while True:
+            data = _leadteh_request(
+                client,
+                "https://app.leadteh.ru/api/v1/getListItems",
+                {"schema_id": schema_id, "page": page},
+            )
+            chunk = data.get("data") or []
+            if isinstance(chunk, dict):
+                chunk = [chunk]
+            items.extend(chunk)
+            meta = data.get("meta") or {}
+            last_page = meta.get("last_page") or meta.get("lastPage")
+            if not last_page or page >= int(last_page):
+                break
+            page += 1
+            time.sleep(0.6)
+    return items
+
+
+def _leadteh_bool(value: Any) -> int:
+    if isinstance(value, bool):
+        return 1 if value else 0
+    s = str(value).strip().lower()
+    if s in ("1", "true", "yes", "y", "да"):
+        return 1
+    if s in ("0", "false", "no", "n", "нет"):
+        return 0
+    return 0
+
+
+def _leadteh_int(value: Any) -> int:
+    try:
+        return int(float(str(value).replace(",", ".").strip()))
+    except Exception:
+        return 0
+
+
+def _leadteh_str(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        return value.get("url") or value.get("path") or value.get("value") or ""
+    return str(value)
+
+
+def sync_leadteh_products() -> dict:
+    if not _leadteh_products_enabled():
+        raise HTTPException(500, "Set LEADTEH_API_TOKEN and LEADTEH_PRODUCTS_SCHEMA_ID in backend/.env")
+
+    items = _leadteh_get_list_items(LEADTEH_PRODUCTS_SCHEMA_ID)
+    if not items:
+        return {"ok": True, "updated": 0, "created": 0, "skipped": 0}
+
+    con = db()
+    cur = con.cursor()
+    cur.execute("BEGIN IMMEDIATE")
+
+    updated = 0
+    created = 0
+    skipped = 0
+
+    for item in items:
+        sku = _leadteh_str(item.get("sku")).strip()
+        if not sku:
+            skipped += 1
+            continue
+
+        name = _leadteh_str(item.get("name"))
+        price = _leadteh_int(item.get("price"))
+        weight = _leadteh_str(item.get("weight"))
+        shelf_life = _leadteh_str(item.get("shelf_life"))
+        description = _leadteh_str(item.get("description"))
+        image_url = _leadteh_str(item.get("image_url") or item.get("image"))
+        badge = _leadteh_str(item.get("badge"))
+        stock = _leadteh_int(item.get("stock"))
+        sort = _leadteh_int(item.get("sort"))
+        active = _leadteh_bool(item.get("active", 1))
+
+        row = cur.execute("SELECT sku FROM inventory WHERE sku=?", (sku,)).fetchone()
+        if row:
+            cur.execute(
+                """
+                UPDATE inventory
+                SET name=?, price=?, weight=?, shelf_life=?, description=?, image_url=?,
+                    badge=?, stock=?, sort=?, active=?
+                WHERE sku=?
+                """,
+                (name, price, weight, shelf_life, description, image_url, badge, stock, sort, active, sku),
+            )
+            updated += 1
+        else:
+            cur.execute(
+                """
+                INSERT INTO inventory
+                (sku, name, stock, reserved, price, weight, shelf_life, description, image_url, badge, sort, active)
+                VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (sku, name, stock, price, weight, shelf_life, description, image_url, badge, sort, active),
+            )
+            created += 1
+
+    con.commit()
+    con.close()
+    return {"ok": True, "updated": updated, "created": created, "skipped": skipped}
+
+def _normalize_phone(raw: str) -> str:
+    digits = re.sub(r"\D+", "", raw or "")
+    if not digits:
+        return ""
+    # РФ: 11 цифр, 8XXXXXXXXXX -> 7XXXXXXXXXX
+    if len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+    if len(digits) == 11 and digits.startswith("7"):
+        return f"+{digits}"
+    # если формат неизвестен — лучше не отправлять, чтобы не падало
+    return ""
+
+
+def _leadteh_set_variable_sync(client: httpx.Client, contact_id: int, name: str, value: str) -> None:
+    r = client.post(
         "https://app.leadteh.ru/api/v1/setContactVariable",
         params={
             "api_token": LEADTEH_API_TOKEN,
@@ -291,9 +583,10 @@ async def _leadteh_set_variable(client: httpx.AsyncClient, contact_id: int, name
         headers={"X-Requested-With": "XMLHttpRequest"},
         timeout=10,
     )
+    print("Leadteh setVariable:", name, "status=", r.status_code, "body=", (r.text or "")[:200])
 
 
-async def send_to_leadteh(order_id: str) -> None:
+def _send_to_leadteh_sync(order_id: str) -> None:
     if not _leadteh_enabled():
         return
 
@@ -310,33 +603,44 @@ async def send_to_leadteh(order_id: str) -> None:
     if not telegram_id:
         return
 
+    skus = [str(it.get("sku")) for it in items if it.get("sku")]
+    name_map = get_product_name_map(skus)
     items_text = "; ".join(
-        f"{CATALOG.get(it['sku'], {}).get('name', it['sku'])} × {it.get('qty', 1)}"
+        f"{name_map.get(str(it.get('sku')), str(it.get('sku')))} × {it.get('qty', 1)}"
         for it in items
         if it.get("sku")
     )
 
-    async with httpx.AsyncClient() as client:
-        r = await client.post(
+    with httpx.Client() as client:
+        phone = _normalize_phone(customer.get("phone", ""))
+        data_items = {
+            "bot_id": LEADTEH_BOT_ID,
+            "messenger": "telegram",
+            "name": customer.get("name", "") or "Клиент",
+            "email": customer.get("email", ""),
+            "telegram_id": str(telegram_id),
+            "telegram_username": telegram_username or "",
+            "address": delivery.get("pickup_point", ""),
+            "tags[]": "Оплата прошла",
+        }
+        if phone:
+            data_items["phone"] = phone
+
+        r = client.post(
             "https://app.leadteh.ru/api/v1/createOrUpdateContact",
             params={"api_token": LEADTEH_API_TOKEN},
-            data={
-                "bot_id": LEADTEH_BOT_ID,
-                "messenger": "telegram",
-                "name": customer.get("name", "") or "Клиент",
-                "phone": customer.get("phone", ""),
-                "email": customer.get("email", ""),
-                "telegram_id": str(telegram_id),
-                "telegram_username": telegram_username or "",
-                "address": delivery.get("pickup_point", ""),
-                "tags": "Оплата прошла",
-            },
+            data=data_items,
             headers={"X-Requested-With": "XMLHttpRequest"},
             timeout=10,
         )
-        data = r.json()
+        print("Leadteh createOrUpdate:", r.status_code, (r.text or "")[:200])
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
         contact_id = data.get("data", {}).get("id")
         if not contact_id:
+            print("Leadteh: no contact_id in response", data)
             return
 
         variables = [
@@ -347,12 +651,20 @@ async def send_to_leadteh(order_id: str) -> None:
             ("pickup_point", delivery.get("pickup_point", "")),
             ("comment", payload.get("comment", "")),
             ("payment_status", "success"),
+            ("payment_note", "Оплачено"),
             ("order_created_at", str(payload.get("_created_at", ""))),
         ]
 
         for name, value in variables:
-            await _leadteh_set_variable(client, contact_id, name, value or "")
-            await asyncio.sleep(0.6)
+            _leadteh_set_variable_sync(client, contact_id, name, value or "")
+            time.sleep(0.6)
+
+
+async def send_to_leadteh(order_id: str) -> None:
+    try:
+        await asyncio.to_thread(_send_to_leadteh_sync, order_id)
+    except Exception as e:
+        print("Leadteh error:", repr(e))
 
 
 # ---------------------------
@@ -504,7 +816,11 @@ def require_admin(credentials: HTTPBasicCredentials = Depends(security)) -> None
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://miniapp-shop-one.vercel.app",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -583,20 +899,30 @@ async def create_order(order: OrderIn):
     products: List[Dict[str, Any]] = []
     amount = 0
 
+    con = db()
     for it in order.items:
-        if it.sku not in CATALOG:
-            raise HTTPException(400, f"Unknown sku: {it.sku}")
-        p = CATALOG[it.sku]
+        row = con.execute(
+            "SELECT name, price, active FROM inventory WHERE sku=?",
+            (it.sku,),
+        ).fetchone()
+        if not row or int(row["active"] or 0) == 0:
+            con.close()
+            raise HTTPException(400, f"Unknown or inactive sku: {it.sku}")
+        price = int(row["price"] or 0)
+        if price <= 0:
+            con.close()
+            raise HTTPException(400, f"Price not set for sku: {it.sku}")
         products.append(
             {
                 "sku": it.sku,
-                "name": p["name"],
-                "price": p["price"],
+                "name": row["name"],
+                "price": price,
                 "quantity": it.qty,
                 "type": "goods",
             }
         )
-        amount += p["price"] * it.qty
+        amount += price * it.qty
+    con.close()
 
     customer_extra = (
         f"Имя: {order.customer.name}\n"
@@ -784,3 +1110,36 @@ def update_inventory(payload: InventoryUpdateBulk, _: None = Depends(require_adm
     con.commit()
     con.close()
     return {"ok": True}
+
+
+@app.get("/api/products")
+def get_products():
+    expire_reservations()
+    con = db()
+    rows = con.execute(
+        """
+        SELECT
+          sku,
+          name,
+          price,
+          weight,
+          shelf_life AS shelfLife,
+          description,
+          image_url AS imageUrl,
+          badge,
+          sort,
+          active,
+          stock,
+          reserved,
+          (stock - reserved) AS available
+        FROM inventory
+        ORDER BY sort ASC, name ASC
+        """
+    ).fetchall()
+    con.close()
+    return [dict(r) for r in rows]
+
+
+@app.post("/api/leadteh/sync")
+def sync_products(_: None = Depends(require_admin)):
+    return sync_leadteh_products()

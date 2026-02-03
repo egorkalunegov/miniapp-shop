@@ -312,6 +312,13 @@ body {
   gap: 14px;
 }
 
+.checkoutTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .box {
   background: #fff;
   border-radius: 16px;

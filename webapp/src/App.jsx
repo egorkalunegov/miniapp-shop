@@ -1,10 +1,18 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { CATALOG } from "./catalog.js";
-import { API_BASE, createOrder, getInventory, updateInventory } from "./api.js";
+import { API_BASE, createOrder, getProducts, syncLeadteh, updateInventory } from "./api.js";
 import { getInitData, getUser, initTelegram } from "./telegram.js";
 
 function rub(v) {
   return new Intl.NumberFormat("ru-RU").format(v) + " ₽";
+}
+
+function normalizePhoneForSend(value) {
+  const digits = String(value || "").replace(/\D+/g, "");
+  if (!digits) return "";
+  if (digits.length === 11 && digits.startsWith("8")) return `+7${digits.slice(1)}`;
+  if (digits.length === 11 && digits.startsWith("7")) return `+${digits}`;
+  if (digits.length === 10) return `+7${digits}`;
+  return value;
 }
 
 export default function App() {
@@ -13,14 +21,16 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [activeSku, setActiveSku] = useState("");
-  const [inventory, setInventory] = useState({});
-  const [invError, setInvError] = useState("");
+  const [products, setProducts] = useState([]);
+  const [productsError, setProductsError] = useState("");
   const [adminUser, setAdminUser] = useState("");
   const [adminPass, setAdminPass] = useState("");
   const [adminAuth, setAdminAuth] = useState("");
   const [adminStocks, setAdminStocks] = useState({});
   const [adminSaving, setAdminSaving] = useState(false);
   const [adminError, setAdminError] = useState("");
+  const [adminSyncing, setAdminSyncing] = useState(false);
+  const [adminSyncMsg, setAdminSyncMsg] = useState("");
 
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -40,67 +50,74 @@ export default function App() {
     if (tgUser?.first_name && !name) setName(tgUser.first_name);
   }, []);
 
-  useEffect(() => {
-    if (adminRoute) return;
-    getInventory()
+  const loadProducts = () =>
+    getProducts()
       .then((rows) => {
-        const map = {};
-        rows.forEach((r) => {
-          map[r.sku] = r;
-        });
-        setInventory(map);
+        setProducts(rows || []);
+        setProductsError("");
       })
-      .catch((e) => setInvError(String(e?.message || e)));
+      .catch((e) => setProductsError(String(e?.message || e)));
+
+  useEffect(() => {
+    loadProducts();
   }, [adminRoute]);
 
   useEffect(() => {
     if (!adminRoute) return;
-    getInventory()
-      .then((rows) => {
-        const map = {};
-        const stocks = {};
-        rows.forEach((r) => {
-          map[r.sku] = r;
-          stocks[r.sku] = r.stock ?? 0;
-        });
-        setInventory(map);
-        setAdminStocks(stocks);
-      })
-      .catch((e) => setAdminError(String(e?.message || e)));
-  }, [adminRoute]);
+    const stocks = {};
+    products.forEach((p) => {
+      stocks[p.sku] = p.stock ?? 0;
+    });
+    setAdminStocks(stocks);
+  }, [adminRoute, products]);
+
+  const productMap = useMemo(() => {
+    const map = {};
+    products.forEach((p) => {
+      map[p.sku] = p;
+    });
+    return map;
+  }, [products]);
 
   const items = useMemo(
     () =>
       Object.entries(cart)
-        .filter(([, qty]) => qty > 0)
+        .filter(([sku, qty]) => qty > 0 && productMap[sku])
         .map(([sku, qty]) => ({ sku, qty })),
-    [cart]
+    [cart, productMap]
+  );
+
+  const visibleProducts = useMemo(
+    () => products.filter((p) => p.active !== 0),
+    [products]
   );
 
   const catalogSorted = useMemo(() => {
-    const orderIndex = new Map(CATALOG.map((p, i) => [p.sku, i]));
-    const arr = [...CATALOG];
+    const arr = [...visibleProducts];
     arr.sort((a, b) => {
-      const aAvail = inventory[a.sku]?.available;
-      const bAvail = inventory[b.sku]?.available;
+      const aAvail = a.available;
+      const bAvail = b.available;
       const aOut = aAvail !== undefined ? aAvail <= 0 : false;
       const bOut = bAvail !== undefined ? bAvail <= 0 : false;
       if (aOut !== bOut) return aOut ? 1 : -1;
-      return (orderIndex.get(a.sku) ?? 0) - (orderIndex.get(b.sku) ?? 0);
+      const aSort = a.sort ?? 0;
+      const bSort = b.sort ?? 0;
+      if (aSort !== bSort) return aSort - bSort;
+      return String(a.name).localeCompare(String(b.name), "ru");
     });
     return arr;
-  }, [inventory]);
+  }, [visibleProducts]);
 
   const cartCount = useMemo(() => items.reduce((a, b) => a + b.qty, 0), [items]);
 
   const total = useMemo(() => {
     let s = 0;
     for (const it of items) {
-      const p = CATALOG.find((x) => x.sku === it.sku);
-      if (p) s += p.price * it.qty;
+      const p = productMap[it.sku];
+      if (p) s += Number(p.price || 0) * it.qty;
     }
     return s;
-  }, [items]);
+  }, [items, productMap]);
 
   const deliveryFee = useMemo(() => {
     if (delivery === "ozon" || delivery === "wildberries") return 200;
@@ -114,9 +131,15 @@ export default function App() {
     setCart((c) => ({ ...c, [sku]: Math.max(0, (c[sku] || 0) - 1) }));
 
   const activeProduct = useMemo(
-    () => CATALOG.find((p) => p.sku === activeSku) || null,
-    [activeSku]
+    () => productMap[activeSku] || null,
+    [activeSku, productMap]
   );
+
+  function validatePhone(value) {
+    const normalized = normalizePhoneForSend(value);
+    const digits = normalized.replace(/\D+/g, "");
+    return digits.length === 11 && digits.startsWith("7");
+  }
 
   async function submit() {
     setError("");
@@ -124,6 +147,7 @@ export default function App() {
     if (!name.trim()) return setError("Введите имя.");
     if (!email.trim()) return setError("Введите email.");
     if (!phone.trim()) return setError("Введите телефон.");
+    if (!validatePhone(phone.trim())) return setError("Введите телефон в формате +7 900 000-00-00.");
     if (!pickupPoint.trim()) return setError("Укажите пункт выдачи.");
 
     setLoading(true);
@@ -132,7 +156,11 @@ export default function App() {
         initData: getInitData(),
         telegram_id: tgUser?.id || null,
         telegram_username: tgUser?.username || null,
-        customer: { name: name.trim(), email: email.trim(), phone: phone.trim() },
+        customer: {
+          name: name.trim(),
+          email: email.trim(),
+          phone: normalizePhoneForSend(phone.trim()),
+        },
         delivery: { method: delivery, pickup_point: pickupPoint.trim() },
         comment: comment.trim(),
         items
@@ -174,15 +202,31 @@ export default function App() {
     setAdminError("");
     setAdminSaving(true);
     try {
-      const itemsToSave = CATALOG.map((p) => ({
+      const itemsToSave = products.map((p) => ({
         sku: p.sku,
         stock: Number(adminStocks[p.sku] ?? 0),
       }));
       await updateInventory(adminAuth, itemsToSave);
+      await loadProducts();
     } catch (e) {
       setAdminError(String(e?.message || e));
     } finally {
       setAdminSaving(false);
+    }
+  }
+
+  async function syncFromLeadteh() {
+    setAdminError("");
+    setAdminSyncMsg("");
+    setAdminSyncing(true);
+    try {
+      const res = await syncLeadteh(adminAuth);
+      setAdminSyncMsg(`Синхронизировано: ${res.created || 0} новых, ${res.updated || 0} обновлено, ${res.skipped || 0} пропущено.`);
+      await loadProducts();
+    } catch (e) {
+      setAdminError(String(e?.message || e));
+    } finally {
+      setAdminSyncing(false);
     }
   }
 
@@ -215,8 +259,12 @@ export default function App() {
           <div className="box">
             <div className="boxTitle">Остатки товаров</div>
             {adminError && <div className="error">{adminError}</div>}
+            {adminSyncMsg && <div className="muted">{adminSyncMsg}</div>}
+            <button className="openBtn" onClick={syncFromLeadteh} disabled={adminSyncing}>
+              {adminSyncing ? "Синхронизация..." : "Синхронизировать из Leadteh"}
+            </button>
             <div className="adminList">
-              {CATALOG.map((p) => (
+              {products.map((p) => (
                 <div className="adminRow" key={p.sku}>
                   <div>
                     <div className="adminName">{p.name}</div>
@@ -252,20 +300,22 @@ export default function App() {
             <span>ЭТО ЛЮБЯТ ЛЮДИ</span>
           </div>
         </div>
-        <button
-          className="cartBtn cartBtn--sticky"
-          onClick={() => setStep(step === "checkout" ? "shop" : "checkout")}
-        >
-          🧺 Корзина ({cartCount})
-        </button>
+        {step !== "checkout" && (
+          <button
+            className="cartBtn cartBtn--sticky"
+            onClick={() => setStep(step === "checkout" ? "shop" : "checkout")}
+          >
+            🧺 Корзина ({cartCount})
+          </button>
+        )}
       </header>
-      {invError && <div className="error">{invError}</div>}
+      {productsError && <div className="error">{productsError}</div>}
 
       {step === "shop" && (
         <div className="grid">
           {catalogSorted.map((p) => {
             const qty = cart[p.sku] || 0;
-            const available = inventory[p.sku]?.available;
+            const available = p.available;
             const isOut = available !== undefined && available <= 0;
             return (
               <div key={p.sku} className={`card ${isOut ? "card--out" : ""}`}>
@@ -313,7 +363,12 @@ export default function App() {
 
       {step === "checkout" && (
         <div className="checkout">
-          <h2>Оформление заказа</h2>
+          <div className="checkoutTop">
+            <h2>Оформление заказа</h2>
+            <button className="openBtn" onClick={() => setStep("shop")}>
+              К ТОВАРАМ
+            </button>
+          </div>
 
           <div className="box">
             <div className="boxTitle">Корзина</div>
@@ -322,7 +377,7 @@ export default function App() {
             ) : (
               <div>
                 {items.map((it) => {
-                  const p = CATALOG.find((x) => x.sku === it.sku);
+                  const p = productMap[it.sku];
                   return (
                     <div key={it.sku} className="cartRow">
                       <div>
@@ -367,7 +422,14 @@ export default function App() {
 
             <label className="field">
               <span>Номер телефона</span>
-              <input value={phone} onChange={(e) => setPhone(e.target.value)} />
+              <input
+                value={phone}
+                onChange={(e) => setPhone(e.target.value)}
+                onBlur={(e) => setPhone(normalizePhoneForSend(e.target.value))}
+                placeholder="+7 900 000-00-00"
+                inputMode="tel"
+              />
+              <div className="muted">Формат: +7 900 000-00-00 (если введёте 8..., заменим на +7)</div>
             </label>
 
             <label className="field">
@@ -432,7 +494,7 @@ export default function App() {
               </div>
               <div className="modalActions">
                 {(() => {
-                  const available = inventory[activeProduct.sku]?.available;
+                  const available = activeProduct.available;
                   const isOut = available !== undefined && available <= 0;
                   if ((cart[activeProduct.sku] || 0) === 0) {
                     return (
