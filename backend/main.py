@@ -1043,7 +1043,7 @@ async def create_order(order: OrderIn):
 
     data_for_sign: Dict[str, Any] = {**base_payload, "do": "link"}
     # подпись (в запросе на создание ссылки)
-    data_for_sign["signature"] = prodamus_sign_unicode(data_for_sign, PRODAMUS_SECRET_KEY)
+    data_for_sign["signature"] = prodamus_sign_ascii(data_for_sign, PRODAMUS_SECRET_KEY)
 
     # Payform ждёт плоский формат products[0][...]
     form_data = flatten_for_prodamus(data_for_sign)
@@ -1068,7 +1068,7 @@ async def create_order(order: OrderIn):
 
     # Прямая ссылка оплаты с параметрами — полезно, если на странице не подхватываются данные.
     data_for_pay = {**base_payload, "do": "pay"}
-    data_for_pay["signature"] = prodamus_sign_unicode(data_for_pay, PRODAMUS_SECRET_KEY)
+    data_for_pay["signature"] = prodamus_sign_ascii(data_for_pay, PRODAMUS_SECRET_KEY)
     pay_form_data = flatten_for_prodamus(data_for_pay)
     payment_url_direct = build_prodamus_url(PRODAMUS_FORM_URL, pay_form_data)
 
