@@ -194,7 +194,7 @@ def init_db() -> None:
     con.commit()
     con.close()
     ensure_inventory_columns()
-    seed_products()
+    seed_products(insert_only=True)
     return
 
 def ensure_inventory_columns() -> None:
@@ -220,29 +220,50 @@ def ensure_inventory_columns() -> None:
     con.close()
 
 
-def seed_products() -> None:
+def seed_products(insert_only: bool = True) -> None:
     con = db()
     cur = con.cursor()
     for p in SEED_PRODUCTS:
-        cur.execute(
-            """
-            INSERT OR IGNORE INTO inventory
-            (sku, name, stock, reserved, price, weight, shelf_life, description, image_url, badge, sort, active)
-            VALUES (?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                p["sku"],
-                p["name"],
-                int(p.get("price") or 0),
-                p.get("weight") or "",
-                p.get("shelf_life") or "",
-                p.get("description") or "",
-                p.get("image_url") or "",
-                p.get("badge") or "",
-                int(p.get("sort") or 0),
-                int(p.get("active") or 0),
-            ),
+        params = (
+            p["sku"],
+            p["name"],
+            int(p.get("price") or 0),
+            p.get("weight") or "",
+            p.get("shelf_life") or "",
+            p.get("description") or "",
+            p.get("image_url") or "",
+            p.get("badge") or "",
+            int(p.get("sort") or 0),
+            int(p.get("active") or 0),
         )
+        if insert_only:
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO inventory
+                (sku, name, stock, reserved, price, weight, shelf_life, description, image_url, badge, sort, active)
+                VALUES (?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                params,
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO inventory
+                (sku, name, stock, reserved, price, weight, shelf_life, description, image_url, badge, sort, active)
+                VALUES (?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(sku) DO UPDATE SET
+                  name=excluded.name,
+                  price=excluded.price,
+                  weight=excluded.weight,
+                  shelf_life=excluded.shelf_life,
+                  description=excluded.description,
+                  image_url=excluded.image_url,
+                  badge=excluded.badge,
+                  sort=excluded.sort,
+                  active=excluded.active
+                """,
+                params,
+            )
     con.commit()
     con.close()
 RESERVE_MINUTES = 30
@@ -557,6 +578,67 @@ def sync_leadteh_products() -> dict:
     con.close()
     return {"ok": True, "updated": updated, "created": created, "skipped": skipped}
 
+
+def push_products_to_leadteh() -> dict:
+    if not _leadteh_products_enabled():
+        raise HTTPException(500, "Set LEADTEH_API_TOKEN and LEADTEH_PRODUCTS_SCHEMA_ID in backend/.env")
+
+    existing = _leadteh_get_list_items(LEADTEH_PRODUCTS_SCHEMA_ID)
+    sku_to_id = {}
+    for item in existing:
+        sku = _leadteh_str(item.get("sku")).strip()
+        item_id = item.get("id") or item.get("_id")
+        if sku and item_id:
+            sku_to_id[sku] = item_id
+
+    con = db()
+    rows = con.execute(
+        """
+        SELECT sku, name, price, weight, shelf_life, description, image_url, badge, sort, active, stock
+        FROM inventory
+        """
+    ).fetchall()
+    con.close()
+
+    created = 0
+    updated = 0
+
+    def to_form(data: dict) -> dict:
+        out = {}
+        for k, v in data.items():
+            out[f"data[{k}]"] = "" if v is None else str(v)
+        return out
+
+    with httpx.Client() as client:
+        for r in rows:
+            payload = {
+                "sku": r["sku"],
+                "name": r["name"],
+                "price": int(r["price"] or 0),
+                "stock": int(r["stock"] or 0),
+                "weight": r["weight"] or "",
+                "shelf_life": r["shelf_life"] or "",
+                "description": r["description"] or "",
+                "image_url": r["image_url"] or "",
+                "badge": r["badge"] or "",
+                "sort": int(r["sort"] or 0),
+                "active": int(r["active"] or 0),
+            }
+            sku = r["sku"]
+            if sku in sku_to_id:
+                data = {"item_id": sku_to_id[sku], **to_form(payload)}
+                resp = _leadteh_request(client, "https://app.leadteh.ru/api/v1/updateListItem", data)
+                if resp.get("data"):
+                    updated += 1
+            else:
+                data = {"schema_id": LEADTEH_PRODUCTS_SCHEMA_ID, **to_form(payload)}
+                resp = _leadteh_request(client, "https://app.leadteh.ru/api/v1/addListItem", data)
+                if resp.get("data"):
+                    created += 1
+            time.sleep(0.6)
+
+    return {"ok": True, "created": created, "updated": updated}
+
 def _normalize_phone(raw: str) -> str:
     digits = re.sub(r"\D+", "", raw or "")
     if not digits:
@@ -820,6 +902,8 @@ app.add_middleware(
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "https://miniapp-shop-one.vercel.app",
+        "https://egorrnd.ru",
+        "https://www.egorrnd.ru",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -1143,3 +1227,14 @@ def get_products():
 @app.post("/api/leadteh/sync")
 def sync_products(_: None = Depends(require_admin)):
     return sync_leadteh_products()
+
+
+@app.post("/api/leadteh/push")
+def push_products(_: None = Depends(require_admin)):
+    return push_products_to_leadteh()
+
+
+@app.post("/api/products/seed")
+def seed_products_endpoint(_: None = Depends(require_admin)):
+    seed_products(insert_only=False)
+    return {"ok": True}
