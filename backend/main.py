@@ -1035,14 +1035,23 @@ async def create_order(order: OrderIn):
     # Payform ждёт плоский формат products[0][...]
     form_data = flatten_for_prodamus(data_for_sign)
 
-    async with httpx.AsyncClient(timeout=20) as client:
+    async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
         r = await client.post(PRODAMUS_FORM_URL, data=form_data)
 
     body = (r.text or "").strip()
-    if r.status_code >= 400 or not body.startswith("http"):
+    payment_url = ""
+    if r.status_code in (301, 302, 303, 307, 308):
+        loc = r.headers.get("location") or r.headers.get("Location")
+        if loc:
+            payment_url = loc.strip()
+    if not payment_url and body.startswith("http"):
+        payment_url = body
+    if not payment_url:
+        m = re.search(r"url=([^\"'>\\s]+)", body, flags=re.IGNORECASE)
+        if m:
+            payment_url = m.group(1).strip()
+    if r.status_code >= 400 or not payment_url.startswith("http"):
         raise HTTPException(502, f"Prodamus response is not a link: status={r.status_code}, body={body[:400]}")
-
-    payment_url = body
 
     con = db()
     con.execute(
