@@ -1014,11 +1014,9 @@ async def create_order(order: OrderIn):
             raise HTTPException(400, f"Price not set for sku: {it.sku}")
         products.append(
             {
-                "sku": it.sku,
                 "name": row["name"],
                 "price": price,
                 "quantity": it.qty,
-                "type": "goods",
             }
         )
         amount += price * it.qty
@@ -1040,8 +1038,7 @@ async def create_order(order: OrderIn):
     # Для подписи products держим как list (как мы формируем)
     base_payload: Dict[str, Any] = {
         "sys": PRODAMUS_SYS,
-        "order_id": order_uuid,            # Prodamus order_id (может быть строкой)
-        "order_num": order_uuid,           # на всякий случай (у некоторых сценариев)
+        "order_id": order_uuid,            # номер заказа в вашей системе
         "customer_phone": customer_phone,
         "customer_email": order.customer.email,
         "customer_extra": customer_extra,
