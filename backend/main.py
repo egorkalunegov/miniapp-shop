@@ -8,6 +8,7 @@ import re
 import asyncio
 import time
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from dotenv import load_dotenv
@@ -822,6 +823,13 @@ def flatten_for_prodamus(data: dict) -> dict:
     return out
 
 
+def build_prodamus_url(base_url: str, form_data: dict) -> str:
+    if not base_url:
+        return ""
+    sep = "&" if "?" in base_url else "?"
+    return f"{base_url}{sep}{urlencode(form_data)}"
+
+
 # ---------------------------
 # Unflatten products[0][name] -> products: [{name:...}]
 # ---------------------------
@@ -1017,18 +1025,23 @@ async def create_order(order: OrderIn):
         f"Комментарий: {order.comment or ''}"
     ).strip()
 
+    # Нормализуем телефон для Prodamus (ожидает только цифры)
+    customer_phone = re.sub(r"\D+", "", order.customer.phone or "")
+    if customer_phone.startswith("8") and len(customer_phone) == 11:
+        customer_phone = "7" + customer_phone[1:]
+
     # Для подписи products держим как list (как мы формируем)
-    data_for_sign: Dict[str, Any] = {
-        "do": "link",
+    base_payload: Dict[str, Any] = {
         "sys": PRODAMUS_SYS,
         "order_id": order_uuid,            # Prodamus order_id (может быть строкой)
         "order_num": order_uuid,           # на всякий случай (у некоторых сценариев)
-        "customer_phone": order.customer.phone,
+        "customer_phone": customer_phone,
         "customer_email": order.customer.email,
         "customer_extra": customer_extra,
         "products": products,
     }
 
+    data_for_sign: Dict[str, Any] = {**base_payload, "do": "link"}
     # подпись (в запросе на создание ссылки)
     data_for_sign["signature"] = prodamus_sign_unicode(data_for_sign, PRODAMUS_SECRET_KEY)
 
@@ -1053,15 +1066,38 @@ async def create_order(order: OrderIn):
     if r.status_code >= 400 or not payment_url.startswith("http"):
         raise HTTPException(502, f"Prodamus response is not a link: status={r.status_code}, body={body[:400]}")
 
+    # Прямая ссылка оплаты с параметрами — полезно, если на странице не подхватываются данные.
+    data_for_pay = {**base_payload, "do": "pay"}
+    data_for_pay["signature"] = prodamus_sign_unicode(data_for_pay, PRODAMUS_SECRET_KEY)
+    pay_form_data = flatten_for_prodamus(data_for_pay)
+    payment_url_direct = build_prodamus_url(PRODAMUS_FORM_URL, pay_form_data)
+
+    def is_empty_payform_link(url: str) -> bool:
+        if not url:
+            return True
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return True
+        return (parsed.path in ("", "/")) and not parsed.query
+
+    if is_empty_payform_link(payment_url):
+        payment_url = payment_url_direct
+
     con = db()
     con.execute(
         "INSERT INTO orders(order_id,status,amount,payload_json,payment_url) VALUES (?,?,?,?,?)",
-        (order_uuid, "created", amount, json.dumps(order.model_dump(), ensure_ascii=False), payment_url),
+        (order_uuid, "created", amount, json.dumps(order.model_dump(), ensure_ascii=False), payment_url_direct or payment_url),
     )
     con.commit()
     con.close()
 
-    return {"order_id": order_uuid, "payment_url": payment_url, "amount": amount}
+    return {
+        "order_id": order_uuid,
+        "payment_url": payment_url,
+        "payment_url_direct": payment_url_direct,
+        "amount": amount
+    }
 
 @app.get("/api/orders/{order_id}")
 def get_order(order_id: str):
