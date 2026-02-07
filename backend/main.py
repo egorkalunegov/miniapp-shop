@@ -1033,10 +1033,9 @@ async def create_order(order: OrderIn):
         f"Комментарий: {order.comment or ''}"
     ).strip()
 
-    # Нормализуем телефон для Prodamus (ожидает только цифры)
-    customer_phone = re.sub(r"\D+", "", order.customer.phone or "")
-    if customer_phone.startswith("8") and len(customer_phone) == 11:
-        customer_phone = "7" + customer_phone[1:]
+    # Телефон передаём как ввёл пользователь (обычно +7...), без нормализации,
+    # чтобы подпись совпала с ожидаемой на стороне Prodamus.
+    customer_phone = (order.customer.phone or "").strip()
 
     # Для подписи products держим как list (как мы формируем)
     base_payload: Dict[str, Any] = {
