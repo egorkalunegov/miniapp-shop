@@ -23,6 +23,8 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 PRODAMUS_FORM_URL = os.getenv("PRODAMUS_FORM_URL", "").strip()
 PRODAMUS_SYS = os.getenv("PRODAMUS_SYS", "").strip()
 PRODAMUS_SECRET_KEY = os.getenv("PRODAMUS_SECRET_KEY", "").strip()
+PRODAMUS_SIGN_MODE = os.getenv("PRODAMUS_SIGN_MODE", "ascii").strip().lower()
+PRODAMUS_SIGN_SOURCE = os.getenv("PRODAMUS_SIGN_SOURCE", "flat").strip().lower()
 ADMIN_USER = os.getenv("ADMIN_USER", "").strip()
 ADMIN_PASS = os.getenv("ADMIN_PASS", "").strip()
 LEADTEH_API_TOKEN = os.getenv("LEADTEH_API_TOKEN", "").strip()
@@ -801,6 +803,12 @@ def prodamus_sign_ascii(data: Dict[str, Any], secret_key: str) -> str:
     s = s.replace("/", r"\/")
     return hmac.new(secret_key.encode("utf-8"), s.encode("utf-8"), hashlib.sha256).hexdigest()
 
+def prodamus_sign(data: Dict[str, Any], secret_key: str) -> str:
+    mode = PRODAMUS_SIGN_MODE
+    if mode == "unicode":
+        return prodamus_sign_unicode(data, secret_key)
+    return prodamus_sign_ascii(data, secret_key)
+
 
 def flatten_for_prodamus(data: dict) -> dict:
     """
@@ -1043,7 +1051,10 @@ async def create_order(order: OrderIn):
 
     data_for_sign: Dict[str, Any] = {**base_payload, "do": "link"}
     # подпись (в запросе на создание ссылки)
-    data_for_sign["signature"] = prodamus_sign_ascii(data_for_sign, PRODAMUS_SECRET_KEY)
+    sign_payload = data_for_sign
+    if PRODAMUS_SIGN_SOURCE == "flat":
+        sign_payload = flatten_for_prodamus(data_for_sign)
+    data_for_sign["signature"] = prodamus_sign(sign_payload, PRODAMUS_SECRET_KEY)
 
     # Payform ждёт плоский формат products[0][...]
     form_data = flatten_for_prodamus(data_for_sign)
@@ -1068,7 +1079,10 @@ async def create_order(order: OrderIn):
 
     # Прямая ссылка оплаты с параметрами — полезно, если на странице не подхватываются данные.
     data_for_pay = {**base_payload, "do": "pay"}
-    data_for_pay["signature"] = prodamus_sign_ascii(data_for_pay, PRODAMUS_SECRET_KEY)
+    pay_sign_payload = data_for_pay
+    if PRODAMUS_SIGN_SOURCE == "flat":
+        pay_sign_payload = flatten_for_prodamus(data_for_pay)
+    data_for_pay["signature"] = prodamus_sign(pay_sign_payload, PRODAMUS_SECRET_KEY)
     pay_form_data = flatten_for_prodamus(data_for_pay)
     payment_url_direct = build_prodamus_url(PRODAMUS_FORM_URL, pay_form_data)
 
