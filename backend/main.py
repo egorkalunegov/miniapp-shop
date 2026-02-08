@@ -25,6 +25,8 @@ PRODAMUS_SYS = os.getenv("PRODAMUS_SYS", "").strip()
 PRODAMUS_SECRET_KEY = os.getenv("PRODAMUS_SECRET_KEY", "").strip()
 PRODAMUS_SIGN_MODE = os.getenv("PRODAMUS_SIGN_MODE", "ascii").strip().lower()
 PRODAMUS_SIGN_SOURCE = os.getenv("PRODAMUS_SIGN_SOURCE", "flat").strip().lower()
+PRODAMUS_INCLUDE_EXTRA = os.getenv("PRODAMUS_INCLUDE_EXTRA", "0").strip().lower() in ("1", "true", "yes")
+PRODAMUS_PHONE_DIGITS = os.getenv("PRODAMUS_PHONE_DIGITS", "1").strip().lower() in ("1", "true", "yes")
 ADMIN_USER = os.getenv("ADMIN_USER", "").strip()
 ADMIN_PASS = os.getenv("ADMIN_PASS", "").strip()
 LEADTEH_API_TOKEN = os.getenv("LEADTEH_API_TOKEN", "").strip()
@@ -1031,9 +1033,14 @@ async def create_order(order: OrderIn):
         f"Комментарий: {order.comment or ''}"
     ).strip()
 
-    # Телефон передаём как ввёл пользователь (обычно +7...), без нормализации,
-    # чтобы подпись совпала с ожидаемой на стороне Prodamus.
-    customer_phone = (order.customer.phone or "").strip()
+    # Телефон: по умолчанию приводим к цифрам (частое требование Prodamus).
+    raw_phone = (order.customer.phone or "").strip()
+    if PRODAMUS_PHONE_DIGITS:
+        customer_phone = re.sub(r"\D+", "", raw_phone)
+        if customer_phone.startswith("8") and len(customer_phone) == 11:
+            customer_phone = "7" + customer_phone[1:]
+    else:
+        customer_phone = raw_phone
 
     # Для подписи products держим как list (как мы формируем)
     base_payload: Dict[str, Any] = {
@@ -1041,9 +1048,10 @@ async def create_order(order: OrderIn):
         "order_id": order_uuid,            # номер заказа в вашей системе
         "customer_phone": customer_phone,
         "customer_email": order.customer.email,
-        "customer_extra": customer_extra,
         "products": products,
     }
+    if PRODAMUS_INCLUDE_EXTRA:
+        base_payload["customer_extra"] = customer_extra
 
     data_for_sign: Dict[str, Any] = {**base_payload, "do": "link"}
     # подпись (в запросе на создание ссылки)
