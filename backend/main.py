@@ -7,7 +7,7 @@ import uuid
 import re
 import asyncio
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse
 
 import httpx
@@ -20,14 +20,30 @@ import secrets
 
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=True)
 
-PRODAMUS_FORM_URL = os.getenv("PRODAMUS_FORM_URL", "").strip()
-PRODAMUS_SYS = os.getenv("PRODAMUS_SYS", "").strip()
-PRODAMUS_SECRET_KEY = os.getenv("PRODAMUS_SECRET_KEY", "").strip()
-PRODAMUS_SIGN_MODE = os.getenv("PRODAMUS_SIGN_MODE", "ascii").strip().lower()
-PRODAMUS_SIGN_SOURCE = os.getenv("PRODAMUS_SIGN_SOURCE", "flat").strip().lower()
-PRODAMUS_MINIMAL = os.getenv("PRODAMUS_MINIMAL", "0").strip().lower() in ("1", "true", "yes")
-PRODAMUS_INCLUDE_EXTRA = os.getenv("PRODAMUS_INCLUDE_EXTRA", "0").strip().lower() in ("1", "true", "yes")
-PRODAMUS_PHONE_DIGITS = os.getenv("PRODAMUS_PHONE_DIGITS", "1").strip().lower() in ("1", "true", "yes")
+def _env_str(name: str, default: str = "") -> str:
+    val = os.getenv(name, default)
+    if val is None:
+        return default
+    val = str(val).strip()
+    if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+        val = val[1:-1].strip()
+    return val
+
+
+PRODAMUS_FORM_URL = _env_str("PRODAMUS_FORM_URL", "")
+PRODAMUS_SYS = _env_str("PRODAMUS_SYS", "")
+PRODAMUS_SECRET_KEY = _env_str("PRODAMUS_SECRET_KEY", "")
+PRODAMUS_SIGN_MODE = _env_str("PRODAMUS_SIGN_MODE", "ascii").lower()
+PRODAMUS_SIGN_SOURCE = _env_str("PRODAMUS_SIGN_SOURCE", "flat").lower()
+PRODAMUS_MINIMAL = _env_str("PRODAMUS_MINIMAL", "0").lower() in ("1", "true", "yes")
+PRODAMUS_AMOUNT_ONLY = _env_str("PRODAMUS_AMOUNT_ONLY", "0").lower() in ("1", "true", "yes")
+PRODAMUS_NO_ORDER_ID = _env_str("PRODAMUS_NO_ORDER_ID", "0").lower() in ("1", "true", "yes")
+PRODAMUS_DIRECT_ONLY = _env_str("PRODAMUS_DIRECT_ONLY", "0").lower() in ("1", "true", "yes")
+PRODAMUS_AUTO_SIGN = _env_str("PRODAMUS_AUTO_SIGN", "0").lower() in ("1", "true", "yes")
+PRODAMUS_AUTO_SIGN_TIMEOUT = float(_env_str("PRODAMUS_AUTO_SIGN_TIMEOUT", "6"))
+PRODAMUS_SINGLE_PRODUCT_NAME = _env_str("PRODAMUS_SINGLE_PRODUCT_NAME", "Оплата заказа")
+PRODAMUS_INCLUDE_EXTRA = _env_str("PRODAMUS_INCLUDE_EXTRA", "0").lower() in ("1", "true", "yes")
+PRODAMUS_PHONE_DIGITS = _env_str("PRODAMUS_PHONE_DIGITS", "1").lower() in ("1", "true", "yes")
 ADMIN_USER = os.getenv("ADMIN_USER", "").strip()
 ADMIN_PASS = os.getenv("ADMIN_PASS", "").strip()
 LEADTEH_API_TOKEN = os.getenv("LEADTEH_API_TOKEN", "").strip()
@@ -841,6 +857,47 @@ def build_prodamus_url(base_url: str, form_data: dict) -> str:
     return f"{base_url}{sep}{urlencode(form_data)}"
 
 
+def _prodamus_signature_variants(data_for_pay: Dict[str, Any], secret_key: str) -> List[Tuple[str, str]]:
+    flat = flatten_for_prodamus(data_for_pay)
+    return [
+        ("nested_ascii", prodamus_sign_ascii(data_for_pay, secret_key)),
+        ("nested_unicode", prodamus_sign_unicode(data_for_pay, secret_key)),
+        ("flat_ascii", prodamus_sign_ascii(flat, secret_key)),
+        ("flat_unicode", prodamus_sign_unicode(flat, secret_key)),
+    ]
+
+
+def _prodamus_pay_url(base_url: str, data_for_pay: Dict[str, Any], signature: str) -> str:
+    payload = dict(data_for_pay)
+    payload["signature"] = signature
+    return build_prodamus_url(base_url, flatten_for_prodamus(payload))
+
+
+async def _prodamus_link_seems_valid(url: str) -> bool:
+    if not url:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=PRODAMUS_AUTO_SIGN_TIMEOUT, follow_redirects=False) as client:
+            r = await client.get(url)
+    except Exception as exc:
+        print("Prodamus validate error:", repr(exc))
+        return False
+
+    # Обычно при ошибке подписи идёт редирект на корень формы.
+    if r.status_code in (301, 302, 303, 307, 308):
+        loc = (r.headers.get("location") or r.headers.get("Location") or "").strip()
+        if loc:
+            base = PRODAMUS_FORM_URL.rstrip("/")
+            if loc.rstrip("/") == base:
+                return False
+        return True
+
+    body = (r.text or "")
+    if "Ошибка подписи" in body:
+        return False
+    return r.status_code < 400
+
+
 # ---------------------------
 # Unflatten products[0][name] -> products: [{name:...}]
 # ---------------------------
@@ -1043,54 +1100,81 @@ async def create_order(order: OrderIn):
     else:
         customer_phone = raw_phone
 
+    # Базовый payload для Prodamus.
+    if PRODAMUS_AMOUNT_ONLY:
+        # Оставляем только сумму в виде одного товара (Prodamus требует products).
+        products_payload = [
+            {
+                "name": PRODAMUS_SINGLE_PRODUCT_NAME or "Оплата заказа",
+                "price": amount,
+                "quantity": 1,
+            }
+        ]
+    else:
+        products_payload = products
+
     # Для подписи products держим как list (как мы формируем)
     base_payload: Dict[str, Any] = {
         "sys": PRODAMUS_SYS,
-        "order_id": order_uuid,            # номер заказа в вашей системе
-        "products": products,
+        "products": products_payload,
     }
-    if not PRODAMUS_MINIMAL:
+    if not PRODAMUS_NO_ORDER_ID:
+        base_payload["order_id"] = order_uuid  # номер заказа в вашей системе
+    if not PRODAMUS_MINIMAL and not PRODAMUS_AMOUNT_ONLY:
         base_payload["customer_phone"] = customer_phone
         base_payload["customer_email"] = order.customer.email
         if PRODAMUS_INCLUDE_EXTRA:
             base_payload["customer_extra"] = customer_extra
 
-    data_for_sign: Dict[str, Any] = {**base_payload, "do": "link"}
-    # подпись (в запросе на создание ссылки)
-    sign_payload = data_for_sign
-    if PRODAMUS_SIGN_SOURCE == "flat":
-        sign_payload = flatten_for_prodamus(data_for_sign)
-    data_for_sign["signature"] = prodamus_sign(sign_payload, PRODAMUS_SECRET_KEY)
-
-    # Payform ждёт плоский формат products[0][...]
-    form_data = flatten_for_prodamus(data_for_sign)
-
-    async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
-        r = await client.post(PRODAMUS_FORM_URL, data=form_data)
-
-    body = (r.text or "").strip()
     payment_url = ""
-    if r.status_code in (301, 302, 303, 307, 308):
-        loc = r.headers.get("location") or r.headers.get("Location")
-        if loc:
-            payment_url = loc.strip()
-    if not payment_url and body.startswith("http"):
-        payment_url = body
-    if not payment_url:
-        m = re.search(r"url=([^\"'>\\s]+)", body, flags=re.IGNORECASE)
-        if m:
-            payment_url = m.group(1).strip()
-    if r.status_code >= 400 or not payment_url.startswith("http"):
-        raise HTTPException(502, f"Prodamus response is not a link: status={r.status_code}, body={body[:400]}")
+    if not PRODAMUS_DIRECT_ONLY:
+        data_for_sign: Dict[str, Any] = {**base_payload, "do": "link"}
+        # подпись (в запросе на создание ссылки)
+        sign_payload = data_for_sign
+        if PRODAMUS_SIGN_SOURCE == "flat":
+            sign_payload = flatten_for_prodamus(data_for_sign)
+        data_for_sign["signature"] = prodamus_sign(sign_payload, PRODAMUS_SECRET_KEY)
+
+        # Payform ждёт плоский формат products[0][...]
+        form_data = flatten_for_prodamus(data_for_sign)
+
+        try:
+            async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
+                r = await client.post(PRODAMUS_FORM_URL, data=form_data)
+
+            body = (r.text or "").strip()
+            if r.status_code in (301, 302, 303, 307, 308):
+                loc = r.headers.get("location") or r.headers.get("Location")
+                if loc:
+                    payment_url = loc.strip()
+            if not payment_url and body.startswith("http"):
+                payment_url = body
+            if not payment_url:
+                m = re.search(r"url=([^\"'>\\s]+)", body, flags=re.IGNORECASE)
+                if m:
+                    payment_url = m.group(1).strip()
+        except Exception as exc:
+            print("Prodamus link request failed, falling back to direct link:", repr(exc))
 
     # Прямая ссылка оплаты с параметрами — полезно, если на странице не подхватываются данные.
     data_for_pay = {**base_payload, "do": "pay"}
-    pay_sign_payload = data_for_pay
-    if PRODAMUS_SIGN_SOURCE == "flat":
-        pay_sign_payload = flatten_for_prodamus(data_for_pay)
-    data_for_pay["signature"] = prodamus_sign(pay_sign_payload, PRODAMUS_SECRET_KEY)
-    pay_form_data = flatten_for_prodamus(data_for_pay)
-    payment_url_direct = build_prodamus_url(PRODAMUS_FORM_URL, pay_form_data)
+    payment_url_direct = ""
+    if PRODAMUS_AUTO_SIGN:
+        for variant, signature in _prodamus_signature_variants(data_for_pay, PRODAMUS_SECRET_KEY):
+            url_try = _prodamus_pay_url(PRODAMUS_FORM_URL, data_for_pay, signature)
+            if await _prodamus_link_seems_valid(url_try):
+                payment_url_direct = url_try
+                print("Prodamus auto-sign ok:", variant)
+                break
+        if not payment_url_direct:
+            print("Prodamus auto-sign failed, falling back to configured mode")
+
+    if not payment_url_direct:
+        pay_sign_payload = data_for_pay
+        if PRODAMUS_SIGN_SOURCE == "flat":
+            pay_sign_payload = flatten_for_prodamus(data_for_pay)
+        signature = prodamus_sign(pay_sign_payload, PRODAMUS_SECRET_KEY)
+        payment_url_direct = _prodamus_pay_url(PRODAMUS_FORM_URL, data_for_pay, signature)
 
     def is_empty_payform_link(url: str) -> bool:
         if not url:
@@ -1101,7 +1185,7 @@ async def create_order(order: OrderIn):
             return True
         return (parsed.path in ("", "/")) and not parsed.query
 
-    if is_empty_payform_link(payment_url):
+    if not payment_url or is_empty_payform_link(payment_url):
         payment_url = payment_url_direct
 
     con = db()
