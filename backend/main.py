@@ -25,6 +25,7 @@ PRODAMUS_SYS = os.getenv("PRODAMUS_SYS", "").strip()
 PRODAMUS_SECRET_KEY = os.getenv("PRODAMUS_SECRET_KEY", "").strip()
 PRODAMUS_SIGN_MODE = os.getenv("PRODAMUS_SIGN_MODE", "ascii").strip().lower()
 PRODAMUS_SIGN_SOURCE = os.getenv("PRODAMUS_SIGN_SOURCE", "flat").strip().lower()
+PRODAMUS_MINIMAL = os.getenv("PRODAMUS_MINIMAL", "0").strip().lower() in ("1", "true", "yes")
 PRODAMUS_INCLUDE_EXTRA = os.getenv("PRODAMUS_INCLUDE_EXTRA", "0").strip().lower() in ("1", "true", "yes")
 PRODAMUS_PHONE_DIGITS = os.getenv("PRODAMUS_PHONE_DIGITS", "1").strip().lower() in ("1", "true", "yes")
 ADMIN_USER = os.getenv("ADMIN_USER", "").strip()
@@ -1046,12 +1047,13 @@ async def create_order(order: OrderIn):
     base_payload: Dict[str, Any] = {
         "sys": PRODAMUS_SYS,
         "order_id": order_uuid,            # номер заказа в вашей системе
-        "customer_phone": customer_phone,
-        "customer_email": order.customer.email,
         "products": products,
     }
-    if PRODAMUS_INCLUDE_EXTRA:
-        base_payload["customer_extra"] = customer_extra
+    if not PRODAMUS_MINIMAL:
+        base_payload["customer_phone"] = customer_phone
+        base_payload["customer_email"] = order.customer.email
+        if PRODAMUS_INCLUDE_EXTRA:
+            base_payload["customer_extra"] = customer_extra
 
     data_for_sign: Dict[str, Any] = {**base_payload, "do": "link"}
     # подпись (в запросе на создание ссылки)
