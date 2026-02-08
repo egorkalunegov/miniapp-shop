@@ -18,7 +18,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 import secrets
 
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"), override=True)
 
 PRODAMUS_FORM_URL = os.getenv("PRODAMUS_FORM_URL", "").strip()
 PRODAMUS_SYS = os.getenv("PRODAMUS_SYS", "").strip()
