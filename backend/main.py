@@ -1119,7 +1119,10 @@ async def create_order(order: OrderIn):
         "products": products_payload,
     }
     if not PRODAMUS_NO_ORDER_ID:
-        base_payload["order_id"] = order_uuid  # номер заказа в вашей системе
+        # Передаём сразу оба поля — Prodamus обычно возвращает order_num (наша система)
+        # и order_id (их внутренний id). Это повышает шанс корректного сопоставления.
+        base_payload["order_id"] = order_uuid  # номер заказа в нашей системе
+        base_payload["order_num"] = order_uuid
     if not PRODAMUS_MINIMAL and not PRODAMUS_AMOUNT_ONLY:
         base_payload["customer_phone"] = customer_phone
         base_payload["customer_email"] = order.customer.email
