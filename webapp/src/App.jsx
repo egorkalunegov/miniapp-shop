@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { API_BASE, createOrder, getProducts, syncLeadteh, updateInventory } from "./api.js";
+import { API_BASE, createOrder, getProducts, pushLeadteh, seedProducts, syncLeadteh, updateInventory } from "./api.js";
 import { getInitData, getUser, initTelegram } from "./telegram.js";
 
 function rub(v) {
@@ -31,6 +31,10 @@ export default function App() {
   const [adminError, setAdminError] = useState("");
   const [adminSyncing, setAdminSyncing] = useState(false);
   const [adminSyncMsg, setAdminSyncMsg] = useState("");
+  const [adminPushing, setAdminPushing] = useState(false);
+  const [adminPushMsg, setAdminPushMsg] = useState("");
+  const [adminSeeding, setAdminSeeding] = useState(false);
+  const [lastOrder, setLastOrder] = useState(null);
 
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -120,7 +124,7 @@ export default function App() {
   }, [items, productMap]);
 
   const deliveryFee = useMemo(() => {
-    if (delivery === "ozon" || delivery === "wildberries") return 200;
+    if (delivery === "ozon") return 200;
     return 0;
   }, [delivery]);
 
@@ -139,6 +143,15 @@ export default function App() {
     const normalized = normalizePhoneForSend(value);
     const digits = normalized.replace(/\D+/g, "");
     return digits.length === 11 && digits.startsWith("7");
+  }
+
+  function openPayment(url) {
+    if (!url) return;
+    if (window.Telegram?.WebApp?.openLink) {
+      window.Telegram.WebApp.openLink(url);
+    } else {
+      window.location.href = url;
+    }
   }
 
   async function submit() {
@@ -167,12 +180,34 @@ export default function App() {
       };
 
       const res = await createOrder(payload);
+      const payUrl = res.payment_url_direct || res.payment_url;
 
-      if (window.Telegram?.WebApp?.openLink) {
-        window.Telegram.WebApp.openLink(res.payment_url);
-      } else {
-        window.location.href = res.payment_url;
-      }
+      const itemsSnapshot = items.map((it) => {
+        const p = productMap[it.sku] || {};
+        return {
+          sku: it.sku,
+          qty: it.qty,
+          name: p.name || it.sku,
+          price: Number(p.price || 0),
+        };
+      });
+      const itemsTotal = itemsSnapshot.reduce((s, it) => s + it.price * it.qty, 0);
+      setLastOrder({
+        order_id: res.order_id,
+        payment_url: payUrl,
+        amount: Number(res.amount || 0),
+        items: itemsSnapshot,
+        items_total: itemsTotal,
+        delivery_fee: deliveryFee,
+        total_with_delivery: itemsTotal + deliveryFee,
+        customer: payload.customer,
+        delivery: payload.delivery,
+        comment: payload.comment,
+        telegram_id: payload.telegram_id,
+        telegram_username: payload.telegram_username,
+      });
+
+      openPayment(payUrl);
       setStep("done");
     } catch (e) {
       setError(String(e?.message || e));
@@ -230,6 +265,35 @@ export default function App() {
     }
   }
 
+  async function pushToLeadteh() {
+    setAdminError("");
+    setAdminPushMsg("");
+    setAdminPushing(true);
+    try {
+      const res = await pushLeadteh(adminAuth);
+      setAdminPushMsg(`Выгружено в Leadteh: ${res.created || 0} новых, ${res.updated || 0} обновлено.`);
+    } catch (e) {
+      setAdminError(String(e?.message || e));
+    } finally {
+      setAdminPushing(false);
+    }
+  }
+
+  async function seedFromTemplate() {
+    setAdminError("");
+    setAdminSyncMsg("");
+    setAdminSeeding(true);
+    try {
+      await seedProducts(adminAuth);
+      setAdminSyncMsg("Карточки восстановлены из шаблона.");
+      await loadProducts();
+    } catch (e) {
+      setAdminError(String(e?.message || e));
+    } finally {
+      setAdminSeeding(false);
+    }
+  }
+
   if (adminRoute) {
     return (
       <div className="wrap">
@@ -260,9 +324,18 @@ export default function App() {
             <div className="boxTitle">Остатки товаров</div>
             {adminError && <div className="error">{adminError}</div>}
             {adminSyncMsg && <div className="muted">{adminSyncMsg}</div>}
-            <button className="openBtn" onClick={syncFromLeadteh} disabled={adminSyncing}>
-              {adminSyncing ? "Синхронизация..." : "Синхронизировать из Leadteh"}
-            </button>
+            <div className="adminActions">
+              <button className="openBtn" onClick={syncFromLeadteh} disabled={adminSyncing}>
+                {adminSyncing ? "Синхронизация..." : "Синхронизировать из Leadteh"}
+              </button>
+              <button className="openBtn" onClick={pushToLeadteh} disabled={adminPushing}>
+                {adminPushing ? "Выгрузка..." : "Выгрузить в Leadteh"}
+              </button>
+              <button className="openBtn" onClick={seedFromTemplate} disabled={adminSeeding}>
+                {adminSeeding ? "Восстановление..." : "Восстановить карточки"}
+              </button>
+            </div>
+            {adminPushMsg && <div className="muted">{adminPushMsg}</div>}
             <div className="adminList">
               {products.map((p) => (
                 <div className="adminRow" key={p.sku}>
@@ -444,6 +517,11 @@ export default function App() {
                   Доставка СДЭК (согласование с менеджером), оплачивается отдельно в день получения заказа.
                 </div>
               )}
+              {delivery === "wildberries" && (
+                <div className="muted">
+                  Доставка Wildbirries (согласование с менеджером), оплачивается отдельно в день получения заказа.
+                </div>
+              )}
             </label>
 
             <label className="field">
@@ -469,10 +547,100 @@ export default function App() {
       )}
 
       {step === "done" && (
-        <div className="box">
-          <div className="boxTitle">Ссылка на оплату открыта ✅</div>
-          <div className="muted">После оплаты придёт сообщение в боте.</div>
-          <button className="cartBtn" onClick={() => setStep("shop")}>Вернуться в магазин</button>
+        <div className="checkout">
+          <div className="box">
+            <div className="boxTitle">Заказ оформлен ✅</div>
+            <div className="muted">Ссылка на оплату открыта. Ниже детали заказа.</div>
+
+            {!lastOrder && (
+              <div className="muted" style={{ marginTop: 10 }}>
+                Нет данных заказа. Вернитесь в магазин и оформите заново.
+              </div>
+            )}
+
+            {lastOrder && (
+              <>
+                <div className="cartRow" style={{ marginTop: 10 }}>
+                  <div className="muted">Номер заказа</div>
+                  <div>{lastOrder.order_id}</div>
+                </div>
+
+                <div className="boxTitle" style={{ marginTop: 12 }}>Товары</div>
+                {lastOrder.items.map((it) => (
+                  <div key={it.sku} className="cartRow">
+                    <div>
+                      <div style={{ fontWeight: 800 }}>{it.name}</div>
+                      <div className="muted">{it.qty} × {rub(it.price)}</div>
+                    </div>
+                    <div>{rub(it.price * it.qty)}</div>
+                  </div>
+                ))}
+                <div className="cartRow">
+                  <div className="muted">Сумма товаров</div>
+                  <div>{rub(lastOrder.items_total)}</div>
+                </div>
+                {lastOrder.delivery_fee > 0 && (
+                  <div className="cartRow">
+                    <div className="muted">Доставка</div>
+                    <div>+ {rub(lastOrder.delivery_fee)}</div>
+                  </div>
+                )}
+                <div className="total">Итого: <b>{rub(lastOrder.total_with_delivery)}</b></div>
+
+                <div className="boxTitle" style={{ marginTop: 12 }}>Контакты</div>
+                <div className="cartRow">
+                  <div className="muted">Имя</div>
+                  <div>{lastOrder.customer?.name}</div>
+                </div>
+                <div className="cartRow">
+                  <div className="muted">Email</div>
+                  <div>{lastOrder.customer?.email}</div>
+                </div>
+                <div className="cartRow">
+                  <div className="muted">Телефон</div>
+                  <div>{lastOrder.customer?.phone}</div>
+                </div>
+                <div className="cartRow">
+                  <div className="muted">Telegram</div>
+                  <div>
+                    {lastOrder.telegram_username
+                      ? `@${lastOrder.telegram_username}`
+                      : (lastOrder.telegram_id || "—")}
+                    {lastOrder.telegram_username && lastOrder.telegram_id
+                      ? ` (id ${lastOrder.telegram_id})`
+                      : ""}
+                  </div>
+                </div>
+
+                <div className="boxTitle" style={{ marginTop: 12 }}>Доставка</div>
+                <div className="cartRow">
+                  <div className="muted">Способ</div>
+                  <div>{lastOrder.delivery?.method}</div>
+                </div>
+                <div className="cartRow">
+                  <div className="muted">Пункт выдачи</div>
+                  <div>{lastOrder.delivery?.pickup_point}</div>
+                </div>
+                {lastOrder.comment && (
+                  <div className="cartRow">
+                    <div className="muted">Комментарий</div>
+                    <div>{lastOrder.comment}</div>
+                  </div>
+                )}
+              </>
+            )}
+
+            <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
+              {lastOrder?.payment_url && (
+                <button className="openBtn" onClick={() => openPayment(lastOrder.payment_url)}>
+                  Открыть оплату еще раз
+                </button>
+              )}
+              <button className="cartBtn" onClick={() => setStep("shop")}>
+                Вернуться в магазин
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
