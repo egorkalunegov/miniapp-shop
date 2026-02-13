@@ -70,3 +70,29 @@ export async function syncLeadteh(authBasic) {
   if (!r.ok) throw new Error(await r.text());
   return await r.json();
 }
+
+export async function pushLeadteh(authBasic) {
+  const r = await fetch(buildUrl("/api/leadteh/push"), {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${authBasic}`,
+      ...ngrokHeaders(),
+    },
+    cache: "no-store",
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return await r.json();
+}
+
+export async function seedProducts(authBasic) {
+  const r = await fetch(buildUrl("/api/products/seed"), {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${authBasic}`,
+      ...ngrokHeaders(),
+    },
+    cache: "no-store",
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return await r.json();
+}
