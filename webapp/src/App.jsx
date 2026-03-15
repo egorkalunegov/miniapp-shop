@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { API_BASE, createOrder, getProducts, pushLeadteh, seedProducts, syncLeadteh, updateInventory } from "./api.js";
+import { API_BASE, createOrder, getProducts, pushLeadteh, seedProducts, syncLeadteh, syncMoySklad, updateInventory } from "./api.js";
 import { getInitData, getUser, initTelegram } from "./telegram.js";
 
 function rub(v) {
@@ -30,6 +30,7 @@ export default function App() {
   const [adminSaving, setAdminSaving] = useState(false);
   const [adminError, setAdminError] = useState("");
   const [adminSyncing, setAdminSyncing] = useState(false);
+  const [adminMoySkladSyncing, setAdminMoySkladSyncing] = useState(false);
   const [adminSyncMsg, setAdminSyncMsg] = useState("");
   const [adminPushing, setAdminPushing] = useState(false);
   const [adminPushMsg, setAdminPushMsg] = useState("");
@@ -265,6 +266,21 @@ export default function App() {
     }
   }
 
+  async function syncFromMoySklad() {
+    setAdminError("");
+    setAdminSyncMsg("");
+    setAdminMoySkladSyncing(true);
+    try {
+      const res = await syncMoySklad(adminAuth);
+      setAdminSyncMsg(`МойСклад: ${res.created || 0} новых, ${res.updated || 0} обновлено, ${res.skipped || 0} пропущено.`);
+      await loadProducts();
+    } catch (e) {
+      setAdminError(String(e?.message || e));
+    } finally {
+      setAdminMoySkladSyncing(false);
+    }
+  }
+
   async function pushToLeadteh() {
     setAdminError("");
     setAdminPushMsg("");
@@ -324,7 +340,11 @@ export default function App() {
             <div className="boxTitle">Остатки товаров</div>
             {adminError && <div className="error">{adminError}</div>}
             {adminSyncMsg && <div className="muted">{adminSyncMsg}</div>}
+            <div className="muted">Для МойСклад каталог, описание, фото и остатки подтягиваются в магазин через синхронизацию.</div>
             <div className="adminActions">
+              <button className="openBtn" onClick={syncFromMoySklad} disabled={adminMoySkladSyncing}>
+                {adminMoySkladSyncing ? "Синхронизация..." : "Синхронизировать из МойСклад"}
+              </button>
               <button className="openBtn" onClick={syncFromLeadteh} disabled={adminSyncing}>
                 {adminSyncing ? "Синхронизация..." : "Синхронизировать из Leadteh"}
               </button>

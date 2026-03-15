@@ -12,7 +12,7 @@ from urllib.parse import urlencode, urlparse
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Request, HTTPException, status
+from fastapi import Depends, FastAPI, Request, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
@@ -49,6 +49,15 @@ ADMIN_PASS = os.getenv("ADMIN_PASS", "").strip()
 LEADTEH_API_TOKEN = os.getenv("LEADTEH_API_TOKEN", "").strip()
 LEADTEH_BOT_ID = os.getenv("LEADTEH_BOT_ID", "").strip()
 LEADTEH_PRODUCTS_SCHEMA_ID = os.getenv("LEADTEH_PRODUCTS_SCHEMA_ID", "").strip()
+PUBLIC_BASE_URL = _env_str("PUBLIC_BASE_URL", "")
+MOYSKLAD_API_BASE = _env_str("MOYSKLAD_API_BASE", "https://api.moysklad.ru/api/remap/1.2").rstrip("/")
+MOYSKLAD_TOKEN = _env_str("MOYSKLAD_TOKEN", "")
+MOYSKLAD_ATTR_WEIGHT = _env_str("MOYSKLAD_ATTR_WEIGHT", "Вес")
+MOYSKLAD_ATTR_SHELF_LIFE = _env_str("MOYSKLAD_ATTR_SHELF_LIFE", "Срок годности")
+MOYSKLAD_ATTR_BADGE = _env_str("MOYSKLAD_ATTR_BADGE", "Бейдж")
+MOYSKLAD_ATTR_SORT = _env_str("MOYSKLAD_ATTR_SORT", "Порядок")
+MOYSKLAD_ATTR_ACTIVE = _env_str("MOYSKLAD_ATTR_ACTIVE", "Активен")
+MOYSKLAD_ATTR_IMAGE_URL = _env_str("MOYSKLAD_ATTR_IMAGE_URL", "URL изображения")
 
 if PRODAMUS_FORM_URL and not PRODAMUS_FORM_URL.endswith("/"):
     PRODAMUS_FORM_URL += "/"
@@ -156,6 +165,18 @@ SEED_PRODUCTS = [
         "sort": 7,
         "active": 1,
     },
+    {
+        "sku": "CHOCO_ORESHEK_WALNUT",
+        "name": "Конфеты «Орешек с грецким орехом»",
+        "price": 1100,
+        "weight": "120 г",
+        "shelf_life": "3 месяца",
+        "badge": "",
+        "image_url": "/products/gretcrkiy.jpeg",
+        "description": "Состав: Бельгийский молочный шоколад, королевский изюм, грецкий орех.",
+        "sort": 8,
+        "active": 1,
+    },
 ]
 
 
@@ -237,6 +258,8 @@ def ensure_inventory_columns() -> None:
     add_col("badge", "TEXT", "''")
     add_col("sort", "INTEGER", "0")
     add_col("active", "INTEGER", "1")
+    add_col("moysklad_href", "TEXT", "''")
+    add_col("moysklad_image_href", "TEXT", "''")
 
     con.commit()
     con.close()
@@ -661,6 +684,338 @@ def push_products_to_leadteh() -> dict:
 
     return {"ok": True, "created": created, "updated": updated}
 
+
+def _moysklad_enabled() -> bool:
+    return bool(MOYSKLAD_TOKEN)
+
+
+def _moysklad_headers(accept: str = "application/json") -> dict:
+    headers = {
+        "Authorization": f"Bearer {MOYSKLAD_TOKEN}",
+        "Accept": accept,
+    }
+    if accept == "application/json":
+        headers["Content-Type"] = "application/json"
+    return headers
+
+
+def _moysklad_host_allowed(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host == "moysklad.ru" or host.endswith(".moysklad.ru")
+
+
+def _moysklad_request(
+    client: httpx.Client,
+    method: str,
+    path_or_url: str,
+    *,
+    params: Optional[dict] = None,
+    json_body: Optional[dict] = None,
+) -> dict:
+    url = path_or_url if path_or_url.startswith("http") else f"{MOYSKLAD_API_BASE}{path_or_url}"
+    r = client.request(
+        method,
+        url,
+        params=params,
+        json=json_body,
+        headers=_moysklad_headers(),
+        timeout=30,
+    )
+    try:
+        r.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        body = (exc.response.text or "")[:400]
+        raise HTTPException(exc.response.status_code, f"MoySklad API error: {body}")
+    try:
+        return r.json()
+    except Exception:
+        return {}
+
+
+def _moysklad_get_rows(
+    client: httpx.Client,
+    path: str,
+    *,
+    params: Optional[dict] = None,
+    limit: int = 100,
+) -> list[dict]:
+    rows: list[dict] = []
+    offset = 0
+    base_params = dict(params or {})
+    while True:
+        req_params = {**base_params, "limit": limit, "offset": offset}
+        data = _moysklad_request(client, "GET", path, params=req_params)
+        chunk = data.get("rows") or []
+        if not isinstance(chunk, list):
+            chunk = []
+        rows.extend(chunk)
+        size = (data.get("meta") or {}).get("size")
+        offset += len(chunk)
+        if not chunk:
+            break
+        if size is not None:
+            try:
+                if offset >= int(size):
+                    break
+            except Exception:
+                pass
+        if len(chunk) < limit:
+            break
+    return rows
+
+
+def _moysklad_string(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, dict):
+        return value.get("name") or value.get("value") or value.get("href") or ""
+    return str(value).strip()
+
+
+def _moysklad_int(value: Any) -> int:
+    try:
+        return int(round(float(str(value).replace(",", ".").strip())))
+    except Exception:
+        return 0
+
+
+def _moysklad_int_or_none(value: Any) -> Optional[int]:
+    s = _moysklad_string(value)
+    if not s:
+        return None
+    try:
+        return int(round(float(s.replace(",", "."))))
+    except Exception:
+        return None
+
+
+def _moysklad_bool_or_none(value: Any) -> Optional[int]:
+    s = _moysklad_string(value).lower()
+    if not s:
+        return None
+    if s in ("1", "true", "yes", "y", "да"):
+        return 1
+    if s in ("0", "false", "no", "n", "нет"):
+        return 0
+    return None
+
+
+def _moysklad_attr_rows(item: dict) -> list[dict]:
+    attrs = item.get("attributes") or []
+    if isinstance(attrs, dict):
+        rows = attrs.get("rows") or []
+        return rows if isinstance(rows, list) else []
+    return attrs if isinstance(attrs, list) else []
+
+
+def _moysklad_attr_value(item: dict, attr_name: str) -> str:
+    target = (attr_name or "").strip().lower()
+    if not target:
+        return ""
+    for attr in _moysklad_attr_rows(item):
+        if _moysklad_string(attr.get("name")).lower() != target:
+            continue
+        value = attr.get("value")
+        if isinstance(value, dict):
+            return _moysklad_string(value)
+        return _moysklad_string(value)
+    return ""
+
+
+def _moysklad_price(item: dict) -> int:
+    prices = item.get("salePrices") or []
+    if isinstance(prices, list) and prices:
+        value = prices[0].get("value")
+        if value is not None:
+            return max(_moysklad_int(value) // 100, 0)
+    return 0
+
+
+def _moysklad_sku(item: dict) -> str:
+    for candidate in ("article", "code", "externalCode", "id"):
+        value = _moysklad_string(item.get(candidate))
+        if value:
+            return value
+    return ""
+
+
+def _moysklad_image_href(item: dict) -> str:
+    image = item.get("image")
+    if isinstance(image, dict):
+        for key in ("downloadHref", "miniature", "href"):
+            value = _moysklad_string(image.get(key))
+            if value:
+                return value
+        meta = image.get("meta") or {}
+        value = _moysklad_string(meta.get("href"))
+        if value:
+            return value
+
+    images = item.get("images") or {}
+    rows = images.get("rows") if isinstance(images, dict) else images
+    if isinstance(rows, list):
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            for key in ("downloadHref", "miniature", "href"):
+                value = _moysklad_string(row.get(key))
+                if value:
+                    return value
+            meta = row.get("meta") or {}
+            value = _moysklad_string(meta.get("href"))
+            if value:
+                return value
+    return ""
+
+
+def _absolute_public_url(path: str) -> str:
+    if not path:
+        return ""
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+    if PUBLIC_BASE_URL:
+        return f"{PUBLIC_BASE_URL.rstrip('/')}{path}"
+    return path
+
+
+def _moysklad_proxy_image_url(remote_href: str) -> str:
+    if not remote_href or not _moysklad_host_allowed(remote_href):
+        return ""
+    return _absolute_public_url(f"/api/moysklad/image?{urlencode({'href': remote_href})}")
+
+
+def sync_moysklad_products() -> dict:
+    if not _moysklad_enabled():
+        raise HTTPException(500, "Set MOYSKLAD_TOKEN in backend/.env")
+
+    with httpx.Client() as client:
+        items = _moysklad_get_rows(client, "/entity/product", params={"expand": "images"})
+
+    if not items:
+        return {"ok": True, "updated": 0, "created": 0, "skipped": 0}
+
+    con = db()
+    cur = con.cursor()
+    cur.execute("BEGIN IMMEDIATE")
+
+    updated = 0
+    created = 0
+    skipped = 0
+
+    for item in items:
+        sku = _moysklad_sku(item)
+        name = _moysklad_string(item.get("name"))
+        if not sku or not name:
+            skipped += 1
+            continue
+
+        existing = cur.execute(
+            """
+            SELECT sku, stock, weight, shelf_life, description, image_url, badge, sort, active
+            FROM inventory
+            WHERE sku=?
+            """,
+            (sku,),
+        ).fetchone()
+
+        attr_weight = _moysklad_attr_value(item, MOYSKLAD_ATTR_WEIGHT)
+        attr_shelf_life = _moysklad_attr_value(item, MOYSKLAD_ATTR_SHELF_LIFE)
+        attr_badge = _moysklad_attr_value(item, MOYSKLAD_ATTR_BADGE)
+        attr_sort = _moysklad_attr_value(item, MOYSKLAD_ATTR_SORT)
+        attr_active = _moysklad_attr_value(item, MOYSKLAD_ATTR_ACTIVE)
+        attr_image_url = _moysklad_attr_value(item, MOYSKLAD_ATTR_IMAGE_URL)
+
+        weight_value = attr_weight or ""
+        if not weight_value:
+            standard_weight = _moysklad_int_or_none(item.get("weight"))
+            if standard_weight:
+                weight_value = f"{standard_weight} г"
+        if not weight_value and existing:
+            weight_value = _moysklad_string(existing["weight"])
+
+        shelf_life_value = attr_shelf_life or (_moysklad_string(existing["shelf_life"]) if existing else "")
+        badge_value = attr_badge or (_moysklad_string(existing["badge"]) if existing else "")
+
+        sort_value = _moysklad_int_or_none(attr_sort)
+        if sort_value is None:
+            sort_value = _moysklad_int(existing["sort"]) if existing else 0
+
+        active_value = _moysklad_bool_or_none(attr_active)
+        if active_value is None:
+            active_value = 0 if item.get("archived") else 1
+
+        stock_value = _moysklad_int_or_none(item.get("stock"))
+        if stock_value is None:
+            stock_value = _moysklad_int_or_none(item.get("quantity"))
+        if stock_value is None:
+            stock_value = _moysklad_int(existing["stock"]) if existing else 0
+
+        image_href = _moysklad_image_href(item)
+        image_url = attr_image_url or _moysklad_proxy_image_url(image_href)
+        if not image_url and existing:
+            image_url = _moysklad_string(existing["image_url"])
+
+        description_value = _moysklad_string(item.get("description"))
+        if not description_value and existing:
+            description_value = _moysklad_string(existing["description"])
+
+        moysklad_href = _moysklad_string(((item.get("meta") or {}).get("href")))
+        price_value = _moysklad_price(item)
+
+        if existing:
+            cur.execute(
+                """
+                UPDATE inventory
+                SET name=?, price=?, weight=?, shelf_life=?, description=?, image_url=?,
+                    badge=?, stock=?, sort=?, active=?, moysklad_href=?, moysklad_image_href=?
+                WHERE sku=?
+                """,
+                (
+                    name,
+                    price_value,
+                    weight_value,
+                    shelf_life_value,
+                    description_value,
+                    image_url,
+                    badge_value,
+                    stock_value,
+                    sort_value,
+                    active_value,
+                    moysklad_href,
+                    image_href,
+                    sku,
+                ),
+            )
+            updated += 1
+        else:
+            cur.execute(
+                """
+                INSERT INTO inventory
+                (sku, name, stock, reserved, price, weight, shelf_life, description, image_url, badge, sort, active, moysklad_href, moysklad_image_href)
+                VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sku,
+                    name,
+                    stock_value,
+                    price_value,
+                    weight_value,
+                    shelf_life_value,
+                    description_value,
+                    image_url,
+                    badge_value,
+                    sort_value,
+                    active_value,
+                    moysklad_href,
+                    image_href,
+                ),
+            )
+            created += 1
+
+    con.commit()
+    con.close()
+    return {"ok": True, "updated": updated, "created": created, "skipped": skipped}
+
 def _normalize_phone(raw: str) -> str:
     digits = re.sub(r"\D+", "", raw or "")
     if not digits:
@@ -1000,6 +1355,27 @@ def root():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/moysklad/image")
+def moysklad_image_proxy(href: str):
+    if not _moysklad_enabled():
+        raise HTTPException(500, "Set MOYSKLAD_TOKEN in backend/.env")
+    if not href or not _moysklad_host_allowed(href):
+        raise HTTPException(400, "Invalid image href")
+
+    with httpx.Client(timeout=30) as client:
+        r = client.get(href, headers=_moysklad_headers(accept="*/*"))
+
+    if r.status_code >= 400:
+        raise HTTPException(r.status_code, "MoySklad image fetch failed")
+
+    media_type = r.headers.get("content-type") or "application/octet-stream"
+    return Response(
+        content=r.content,
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 # ---------------------------
@@ -1379,6 +1755,11 @@ def get_products():
 @app.post("/api/leadteh/sync")
 def sync_products(_: None = Depends(require_admin)):
     return sync_leadteh_products()
+
+
+@app.post("/api/moysklad/sync")
+def sync_products_moysklad(_: None = Depends(require_admin)):
+    return sync_moysklad_products()
 
 
 @app.post("/api/leadteh/push")
