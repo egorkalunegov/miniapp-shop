@@ -1056,9 +1056,12 @@ def _send_to_leadteh_sync(order_id: str) -> None:
     customer = payload.get("customer") or {}
     delivery = payload.get("delivery") or {}
     items = payload.get("items") or []
+    messenger_platform = str(payload.get("messenger_platform") or ("telegram" if payload.get("telegram_id") else "")).lower()
     telegram_id = payload.get("telegram_id")
     telegram_username = payload.get("telegram_username")
 
+    if messenger_platform and messenger_platform != "telegram":
+        return
     if not telegram_id:
         return
 
@@ -1399,6 +1402,9 @@ class Delivery(BaseModel):
 
 class OrderIn(BaseModel):
     initData: str = ""
+    messenger_platform: Optional[str] = None
+    messenger_user_id: Optional[str] = None
+    messenger_username: Optional[str] = None
     telegram_id: Optional[int] = None
     telegram_username: Optional[str] = None
     customer: Customer

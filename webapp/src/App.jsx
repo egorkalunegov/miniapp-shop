@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { API_BASE, createOrder, getProducts, pushLeadteh, seedProducts, syncLeadteh, syncMoySklad, updateInventory } from "./api.js";
-import { getInitData, getUser, initTelegram } from "./telegram.js";
+import { getInitData, getMessengerPlatform, getUser, initMessenger, openExternalLink } from "./telegram.js";
 
 function rub(v) {
   return new Intl.NumberFormat("ru-RU").format(v) + " ₽";
@@ -44,15 +44,16 @@ export default function App() {
   const [pickupPoint, setPickupPoint] = useState("");
   const [comment, setComment] = useState("");
 
-  const tgUser = useMemo(() => getUser(), []);
+  const messengerUser = useMemo(() => getUser(), []);
+  const messengerPlatform = useMemo(() => getMessengerPlatform(), []);
   const adminRoute = useMemo(() => {
     const ADMIN_HASH = "#/peopleloveit-admin";
     return window.location.hash === ADMIN_HASH;
   }, []);
 
   useEffect(() => {
-    initTelegram();
-    if (tgUser?.first_name && !name) setName(tgUser.first_name);
+    initMessenger();
+    if (messengerUser?.first_name && !name) setName(messengerUser.first_name);
   }, []);
 
   const loadProducts = () =>
@@ -148,11 +149,7 @@ export default function App() {
 
   function openPayment(url) {
     if (!url) return;
-    if (window.Telegram?.WebApp?.openLink) {
-      window.Telegram.WebApp.openLink(url);
-    } else {
-      window.location.href = url;
-    }
+    openExternalLink(url);
   }
 
   async function submit() {
@@ -168,8 +165,11 @@ export default function App() {
     try {
       const payload = {
         initData: getInitData(),
-        telegram_id: tgUser?.id || null,
-        telegram_username: tgUser?.username || null,
+        messenger_platform: messengerPlatform !== "web" ? messengerPlatform : null,
+        messenger_user_id: messengerUser?.id ? String(messengerUser.id) : null,
+        messenger_username: messengerUser?.username || null,
+        telegram_id: messengerPlatform === "telegram" ? messengerUser?.id || null : null,
+        telegram_username: messengerPlatform === "telegram" ? messengerUser?.username || null : null,
         customer: {
           name: name.trim(),
           email: email.trim(),
@@ -204,8 +204,9 @@ export default function App() {
         customer: payload.customer,
         delivery: payload.delivery,
         comment: payload.comment,
-        telegram_id: payload.telegram_id,
-        telegram_username: payload.telegram_username,
+        messenger_platform: payload.messenger_platform,
+        messenger_user_id: payload.messenger_user_id,
+        messenger_username: payload.messenger_username,
       });
 
       openPayment(payUrl);
@@ -621,13 +622,15 @@ export default function App() {
                   <div>{lastOrder.customer?.phone}</div>
                 </div>
                 <div className="cartRow">
-                  <div className="muted">Telegram</div>
+                  <div className="muted">Мессенджер</div>
                   <div>
-                    {lastOrder.telegram_username
-                      ? `@${lastOrder.telegram_username}`
-                      : (lastOrder.telegram_id || "—")}
-                    {lastOrder.telegram_username && lastOrder.telegram_id
-                      ? ` (id ${lastOrder.telegram_id})`
+                    {lastOrder.messenger_platform || "web"}
+                    {" • "}
+                    {lastOrder.messenger_username
+                      ? `@${lastOrder.messenger_username}`
+                      : (lastOrder.messenger_user_id || "—")}
+                    {lastOrder.messenger_username && lastOrder.messenger_user_id
+                      ? ` (id ${lastOrder.messenger_user_id})`
                       : ""}
                   </div>
                 </div>
