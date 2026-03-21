@@ -115,6 +115,10 @@ export default function App() {
   }, [visibleProducts]);
 
   const cartCount = useMemo(() => items.reduce((a, b) => a + b.qty, 0), [items]);
+  const hasMotiInCart = useMemo(
+    () => items.some((it) => it.sku === "MOTI_Coockies"),
+    [items]
+  );
 
   const total = useMemo(() => {
     let s = 0;
@@ -463,6 +467,12 @@ export default function App() {
               К ТОВАРАМ
             </button>
           </div>
+
+          {hasMotiInCart && (
+            <div className="warningBanner">
+              Продажа моти осуществляется только по Ростову-на-Дону и ДНР
+            </div>
+          )}
 
           <div className="box">
             <div className="boxTitle">Корзина</div>
