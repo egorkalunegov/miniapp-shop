@@ -699,6 +699,10 @@ def _moysklad_headers(accept: str = "application/json;charset=utf-8") -> dict:
     return headers
 
 
+def _moysklad_binary_headers() -> dict:
+    return {"Authorization": f"Bearer {MOYSKLAD_TOKEN}"}
+
+
 def _moysklad_host_allowed(url: str) -> bool:
     host = (urlparse(url).hostname or "").lower()
     return host == "moysklad.ru" or host.endswith(".moysklad.ru")
@@ -865,6 +869,48 @@ def _moysklad_image_href(item: dict) -> str:
             value = _moysklad_string(meta.get("href"))
             if value:
                 return value
+    return ""
+
+
+def _moysklad_download_href(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("downloadHref", "miniature", "href"):
+            candidate = value.get(key)
+            if isinstance(candidate, dict):
+                resolved = _moysklad_string(candidate)
+            else:
+                resolved = _moysklad_string(candidate)
+            if resolved and _moysklad_host_allowed(resolved):
+                return resolved
+
+        meta = value.get("meta") or {}
+        meta_href = _moysklad_string(meta.get("href"))
+        meta_type = _moysklad_string(meta.get("mediaType")).lower()
+        if meta_href and _moysklad_host_allowed(meta_href) and meta_type and not meta_type.startswith("application/json"):
+            return meta_href
+
+        image_href = _moysklad_image_href(value)
+        if image_href and _moysklad_host_allowed(image_href):
+            return image_href
+
+        for key in ("rows", "images", "image"):
+            nested = value.get(key)
+            if isinstance(nested, list):
+                for row in nested:
+                    resolved = _moysklad_download_href(row)
+                    if resolved:
+                        return resolved
+            else:
+                resolved = _moysklad_download_href(nested)
+                if resolved:
+                    return resolved
+
+    elif isinstance(value, list):
+        for row in value:
+            resolved = _moysklad_download_href(row)
+            if resolved:
+                return resolved
+
     return ""
 
 
@@ -1382,8 +1428,20 @@ def moysklad_image_proxy(href: str):
     if not href or not _moysklad_host_allowed(href):
         raise HTTPException(400, "Invalid image href")
 
-    with httpx.Client(timeout=30) as client:
-        r = client.get(href, headers=_moysklad_headers(accept="*/*"))
+    with httpx.Client(timeout=30, follow_redirects=True) as client:
+        current_href = href
+        r = client.get(current_href, headers=_moysklad_binary_headers())
+
+        # Some MoySklad image links first return JSON metadata, not the file itself.
+        if (r.headers.get("content-type") or "").lower().startswith("application/json"):
+            try:
+                payload = r.json()
+            except Exception:
+                payload = {}
+            resolved_href = _moysklad_download_href(payload)
+            if resolved_href and resolved_href != current_href:
+                current_href = resolved_href
+                r = client.get(current_href, headers=_moysklad_binary_headers())
 
     if r.status_code >= 400:
         raise HTTPException(r.status_code, "MoySklad image fetch failed")
