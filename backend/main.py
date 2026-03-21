@@ -888,133 +888,148 @@ def sync_moysklad_products() -> dict:
     if not _moysklad_enabled():
         raise HTTPException(500, "Set MOYSKLAD_TOKEN in backend/.env")
 
-    with httpx.Client() as client:
-        items = _moysklad_get_rows(client, "/entity/product", params={"expand": "images"})
+    ensure_inventory_columns()
 
-    if not items:
-        return {"ok": True, "updated": 0, "created": 0, "skipped": 0}
+    con = None
+    try:
+        with httpx.Client() as client:
+            items = _moysklad_get_rows(client, "/entity/product", params={"expand": "images"})
 
-    con = db()
-    cur = con.cursor()
-    cur.execute("BEGIN IMMEDIATE")
+        if not items:
+            return {"ok": True, "updated": 0, "created": 0, "skipped": 0}
 
-    updated = 0
-    created = 0
-    skipped = 0
+        con = db()
+        cur = con.cursor()
+        cur.execute("BEGIN IMMEDIATE")
 
-    for item in items:
-        sku = _moysklad_sku(item)
-        name = _moysklad_string(item.get("name"))
-        if not sku or not name:
-            skipped += 1
-            continue
+        updated = 0
+        created = 0
+        skipped = 0
 
-        existing = cur.execute(
-            """
-            SELECT sku, stock, weight, shelf_life, description, image_url, badge, sort, active
-            FROM inventory
-            WHERE sku=?
-            """,
-            (sku,),
-        ).fetchone()
+        for item in items:
+            sku = _moysklad_sku(item)
+            name = _moysklad_string(item.get("name"))
+            if not sku or not name:
+                skipped += 1
+                continue
 
-        attr_weight = _moysklad_attr_value(item, MOYSKLAD_ATTR_WEIGHT)
-        attr_shelf_life = _moysklad_attr_value(item, MOYSKLAD_ATTR_SHELF_LIFE)
-        attr_badge = _moysklad_attr_value(item, MOYSKLAD_ATTR_BADGE)
-        attr_sort = _moysklad_attr_value(item, MOYSKLAD_ATTR_SORT)
-        attr_active = _moysklad_attr_value(item, MOYSKLAD_ATTR_ACTIVE)
-        attr_image_url = _moysklad_attr_value(item, MOYSKLAD_ATTR_IMAGE_URL)
-
-        weight_value = attr_weight or ""
-        if not weight_value:
-            standard_weight = _moysklad_int_or_none(item.get("weight"))
-            if standard_weight:
-                weight_value = f"{standard_weight} г"
-        if not weight_value and existing:
-            weight_value = _moysklad_string(existing["weight"])
-
-        shelf_life_value = attr_shelf_life or (_moysklad_string(existing["shelf_life"]) if existing else "")
-        badge_value = attr_badge or (_moysklad_string(existing["badge"]) if existing else "")
-
-        sort_value = _moysklad_int_or_none(attr_sort)
-        if sort_value is None:
-            sort_value = _moysklad_int(existing["sort"]) if existing else 0
-
-        active_value = _moysklad_bool_or_none(attr_active)
-        if active_value is None:
-            active_value = 0 if item.get("archived") else 1
-
-        stock_value = _moysklad_int_or_none(item.get("stock"))
-        if stock_value is None:
-            stock_value = _moysklad_int_or_none(item.get("quantity"))
-        if stock_value is None:
-            stock_value = _moysklad_int(existing["stock"]) if existing else 0
-
-        image_href = _moysklad_image_href(item)
-        image_url = attr_image_url or _moysklad_proxy_image_url(image_href)
-        if not image_url and existing:
-            image_url = _moysklad_string(existing["image_url"])
-
-        description_value = _moysklad_string(item.get("description"))
-        if not description_value and existing:
-            description_value = _moysklad_string(existing["description"])
-
-        moysklad_href = _moysklad_string(((item.get("meta") or {}).get("href")))
-        price_value = _moysklad_price(item)
-
-        if existing:
-            cur.execute(
+            existing = cur.execute(
                 """
-                UPDATE inventory
-                SET name=?, price=?, weight=?, shelf_life=?, description=?, image_url=?,
-                    badge=?, stock=?, sort=?, active=?, moysklad_href=?, moysklad_image_href=?
+                SELECT sku, stock, weight, shelf_life, description, image_url, badge, sort, active
+                FROM inventory
                 WHERE sku=?
                 """,
-                (
-                    name,
-                    price_value,
-                    weight_value,
-                    shelf_life_value,
-                    description_value,
-                    image_url,
-                    badge_value,
-                    stock_value,
-                    sort_value,
-                    active_value,
-                    moysklad_href,
-                    image_href,
-                    sku,
-                ),
-            )
-            updated += 1
-        else:
-            cur.execute(
-                """
-                INSERT INTO inventory
-                (sku, name, stock, reserved, price, weight, shelf_life, description, image_url, badge, sort, active, moysklad_href, moysklad_image_href)
-                VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    sku,
-                    name,
-                    stock_value,
-                    price_value,
-                    weight_value,
-                    shelf_life_value,
-                    description_value,
-                    image_url,
-                    badge_value,
-                    sort_value,
-                    active_value,
-                    moysklad_href,
-                    image_href,
-                ),
-            )
-            created += 1
+                (sku,),
+            ).fetchone()
 
-    con.commit()
-    con.close()
-    return {"ok": True, "updated": updated, "created": created, "skipped": skipped}
+            attr_weight = _moysklad_attr_value(item, MOYSKLAD_ATTR_WEIGHT)
+            attr_shelf_life = _moysklad_attr_value(item, MOYSKLAD_ATTR_SHELF_LIFE)
+            attr_badge = _moysklad_attr_value(item, MOYSKLAD_ATTR_BADGE)
+            attr_sort = _moysklad_attr_value(item, MOYSKLAD_ATTR_SORT)
+            attr_active = _moysklad_attr_value(item, MOYSKLAD_ATTR_ACTIVE)
+            attr_image_url = _moysklad_attr_value(item, MOYSKLAD_ATTR_IMAGE_URL)
+
+            weight_value = attr_weight or ""
+            if not weight_value:
+                standard_weight = _moysklad_int_or_none(item.get("weight"))
+                if standard_weight:
+                    weight_value = f"{standard_weight} г"
+            if not weight_value and existing:
+                weight_value = _moysklad_string(existing["weight"])
+
+            shelf_life_value = attr_shelf_life or (_moysklad_string(existing["shelf_life"]) if existing else "")
+            badge_value = attr_badge or (_moysklad_string(existing["badge"]) if existing else "")
+
+            sort_value = _moysklad_int_or_none(attr_sort)
+            if sort_value is None:
+                sort_value = _moysklad_int(existing["sort"]) if existing else 0
+
+            active_value = _moysklad_bool_or_none(attr_active)
+            if active_value is None:
+                active_value = 0 if item.get("archived") else 1
+
+            stock_value = _moysklad_int_or_none(item.get("stock"))
+            if stock_value is None:
+                stock_value = _moysklad_int_or_none(item.get("quantity"))
+            if stock_value is None:
+                stock_value = _moysklad_int(existing["stock"]) if existing else 0
+
+            image_href = _moysklad_image_href(item)
+            image_url = attr_image_url or _moysklad_proxy_image_url(image_href)
+            if not image_url and existing:
+                image_url = _moysklad_string(existing["image_url"])
+
+            description_value = _moysklad_string(item.get("description"))
+            if not description_value and existing:
+                description_value = _moysklad_string(existing["description"])
+
+            moysklad_href = _moysklad_string(((item.get("meta") or {}).get("href")))
+            price_value = _moysklad_price(item)
+
+            if existing:
+                cur.execute(
+                    """
+                    UPDATE inventory
+                    SET name=?, price=?, weight=?, shelf_life=?, description=?, image_url=?,
+                        badge=?, stock=?, sort=?, active=?, moysklad_href=?, moysklad_image_href=?
+                    WHERE sku=?
+                    """,
+                    (
+                        name,
+                        price_value,
+                        weight_value,
+                        shelf_life_value,
+                        description_value,
+                        image_url,
+                        badge_value,
+                        stock_value,
+                        sort_value,
+                        active_value,
+                        moysklad_href,
+                        image_href,
+                        sku,
+                    ),
+                )
+                updated += 1
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO inventory
+                    (sku, name, stock, reserved, price, weight, shelf_life, description, image_url, badge, sort, active, moysklad_href, moysklad_image_href)
+                    VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        sku,
+                        name,
+                        stock_value,
+                        price_value,
+                        weight_value,
+                        shelf_life_value,
+                        description_value,
+                        image_url,
+                        badge_value,
+                        sort_value,
+                        active_value,
+                        moysklad_href,
+                        image_href,
+                    ),
+                )
+                created += 1
+
+        con.commit()
+        return {"ok": True, "updated": updated, "created": created, "skipped": skipped}
+    except HTTPException:
+        if con is not None:
+            con.rollback()
+        raise
+    except Exception as e:
+        if con is not None:
+            con.rollback()
+        print("MoySklad sync error:", repr(e))
+        raise HTTPException(500, f"MoySklad sync error: {repr(e)}")
+    finally:
+        if con is not None:
+            con.close()
 
 def _normalize_phone(raw: str) -> str:
     digits = re.sub(r"\D+", "", raw or "")
