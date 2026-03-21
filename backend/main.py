@@ -689,13 +689,13 @@ def _moysklad_enabled() -> bool:
     return bool(MOYSKLAD_TOKEN)
 
 
-def _moysklad_headers(accept: str = "application/json") -> dict:
+def _moysklad_headers(accept: str = "application/json;charset=utf-8") -> dict:
     headers = {
         "Authorization": f"Bearer {MOYSKLAD_TOKEN}",
         "Accept": accept,
     }
-    if accept == "application/json":
-        headers["Content-Type"] = "application/json"
+    if accept.startswith("application/json"):
+        headers["Content-Type"] = "application/json;charset=utf-8"
     return headers
 
 
