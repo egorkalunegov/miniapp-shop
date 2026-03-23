@@ -64,6 +64,23 @@ if PRODAMUS_FORM_URL and not PRODAMUS_FORM_URL.endswith("/"):
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "app.db")
 
+FIXED_PRODUCT_SORTS = {
+    "GIFT_BOX_LOVED": 1,
+    "DUBAI_CHOCO": 2,
+    "ASSORTI_HEART": 3,
+    "CHOCO_ORESHEK": 4,
+    "CHOCO_ORESHEK_CARAMEL_COOKIE": 5,
+    "CHOCO_EGGS_COOKIE": 6,
+    "KARTOSHKA": 7,
+    "MOTI_Coockies": 8,
+    "CHOCO_RASPBERRY_NUTS": 9,
+    "CHOCO_RASPBERRY_NUTS_JESUS": 10,
+}
+
+
+def _fixed_sort_for_sku(sku: str, fallback: int = 0) -> int:
+    return FIXED_PRODUCT_SORTS.get((sku or "").strip(), fallback)
+
 # ---- сиды каталога (пока Leadteh не настроен) ----
 SEED_PRODUCTS = [
     {
@@ -278,7 +295,7 @@ def seed_products(insert_only: bool = True) -> None:
             p.get("description") or "",
             p.get("image_url") or "",
             p.get("badge") or "",
-            int(p.get("sort") or 0),
+            _fixed_sort_for_sku(p["sku"], int(p.get("sort") or 0)),
             int(p.get("active") or 0),
         )
         if insert_only:
@@ -930,6 +947,16 @@ def _moysklad_proxy_image_url(remote_href: str) -> str:
     return _absolute_public_url(f"/api/moysklad/image?{urlencode({'href': remote_href})}")
 
 
+def _is_local_storefront_image_url(value: str) -> bool:
+    url = _moysklad_string(value)
+    if not url:
+        return False
+    if url.startswith("/products/"):
+        return True
+    parsed = urlparse(url)
+    return parsed.path.startswith("/products/")
+
+
 def sync_moysklad_products() -> dict:
     if not _moysklad_enabled():
         raise HTTPException(500, "Set MOYSKLAD_TOKEN in backend/.env")
@@ -988,7 +1015,8 @@ def sync_moysklad_products() -> dict:
 
             sort_value = _moysklad_int_or_none(attr_sort)
             if sort_value is None:
-                sort_value = _moysklad_int(existing["sort"]) if existing else 0
+                existing_sort = _moysklad_int(existing["sort"]) if existing else 0
+                sort_value = _fixed_sort_for_sku(sku, existing_sort)
 
             active_value = _moysklad_bool_or_none(attr_active)
             if active_value is None:
@@ -1000,10 +1028,12 @@ def sync_moysklad_products() -> dict:
             if stock_value is None:
                 stock_value = _moysklad_int(existing["stock"]) if existing else 0
 
+            existing_image_url = _moysklad_string(existing["image_url"]) if existing else ""
             image_href = _moysklad_image_href(item)
-            image_url = attr_image_url or _moysklad_proxy_image_url(image_href)
-            if not image_url and existing:
-                image_url = _moysklad_string(existing["image_url"])
+            if existing_image_url and _is_local_storefront_image_url(existing_image_url) and not attr_image_url:
+                image_url = existing_image_url
+            else:
+                image_url = attr_image_url or _moysklad_proxy_image_url(image_href) or existing_image_url
 
             description_value = _moysklad_string(item.get("description"))
             if not description_value and existing:
