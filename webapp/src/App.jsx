@@ -415,6 +415,7 @@ export default function App() {
             const qty = cart[p.sku] || 0;
             const available = p.available;
             const isOut = available !== undefined && available <= 0;
+            const isMotiProduct = p.sku === "MOTI_Coockies";
             return (
               <div key={p.sku} className={`card ${isOut ? "card--out" : ""}`}>
                 <div className="media">
@@ -424,6 +425,9 @@ export default function App() {
                   <div className="priceTag">{rub(p.price)}</div>
                 </div>
                 <div className="cardBody">
+                  {isMotiProduct && (
+                    <div className="infoStrip">Продажа по Ростову-на-Дону и ДНР</div>
+                  )}
                   <div className="cardTitle">{p.name}</div>
                   <div className="chips">
                     {p.weight && <span className="chip">{p.weight}</span>}
@@ -684,6 +688,9 @@ export default function App() {
             <button className="closeBtn" onClick={() => setActiveSku("")}>✕</button>
             <img className="modalImg" src={activeProduct.imageUrl} alt={activeProduct.name} />
             <div className="modalBody">
+              {activeProduct.sku === "MOTI_Coockies" && (
+                <div className="infoStrip">Продажа по Ростову-на-Дону и ДНР</div>
+              )}
               <div className="modalTitle">{activeProduct.name}</div>
               <div className="modalMeta">
                 {activeProduct.weight && <span className="chip">{activeProduct.weight}</span>}

@@ -188,6 +188,17 @@ body {
   color: #51463d;
 }
 
+.infoStrip {
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: #fff0e3;
+  border: 1px solid rgba(123, 62, 0, 0.12);
+  color: #7b3e00;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
 .desc {
   font-size: 13px;
   line-height: 1.45;
