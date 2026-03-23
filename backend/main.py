@@ -52,6 +52,8 @@ LEADTEH_PRODUCTS_SCHEMA_ID = os.getenv("LEADTEH_PRODUCTS_SCHEMA_ID", "").strip()
 PUBLIC_BASE_URL = _env_str("PUBLIC_BASE_URL", "")
 MOYSKLAD_API_BASE = _env_str("MOYSKLAD_API_BASE", "https://api.moysklad.ru/api/remap/1.2").rstrip("/")
 MOYSKLAD_TOKEN = _env_str("MOYSKLAD_TOKEN", "")
+MOYSKLAD_ORGANIZATION_HREF = _env_str("MOYSKLAD_ORGANIZATION_HREF", "")
+MOYSKLAD_STORE_HREF = _env_str("MOYSKLAD_STORE_HREF", "")
 MOYSKLAD_ATTR_WEIGHT = _env_str("MOYSKLAD_ATTR_WEIGHT", "Вес")
 MOYSKLAD_ATTR_SHELF_LIFE = _env_str("MOYSKLAD_ATTR_SHELF_LIFE", "Срок годности")
 MOYSKLAD_ATTR_BADGE = _env_str("MOYSKLAD_ATTR_BADGE", "Бейдж")
@@ -253,9 +255,29 @@ def init_db() -> None:
     """)
     con.commit()
     con.close()
+    ensure_orders_columns()
     ensure_inventory_columns()
     seed_products(insert_only=True)
     return
+
+def ensure_orders_columns() -> None:
+    con = db()
+    cur = con.cursor()
+    cols = {r["name"] for r in cur.execute("PRAGMA table_info(orders)")}
+
+    def add_col(name: str, col_type: str, default_sql: str) -> None:
+        if name in cols:
+            return
+        cur.execute(f"ALTER TABLE orders ADD COLUMN {name} {col_type} DEFAULT {default_sql}")
+
+    add_col("moysklad_demand_href", "TEXT", "''")
+    add_col("moysklad_sync_status", "TEXT", "''")
+    add_col("moysklad_sync_error", "TEXT", "''")
+    add_col("moysklad_synced_at", "TEXT", "NULL")
+
+    con.commit()
+    con.close()
+
 
 def ensure_inventory_columns() -> None:
     con = db()
@@ -480,9 +502,15 @@ def set_order_status(order_id: str, status: str) -> None:
 
 
 def get_order_payload(order_id: str) -> Optional[dict]:
+    ensure_orders_columns()
     con = db()
     row = con.execute(
-        "SELECT payload_json, amount, created_at FROM orders WHERE order_id=?",
+        """
+        SELECT payload_json, amount, created_at, moysklad_demand_href, moysklad_sync_status,
+               moysklad_sync_error, moysklad_synced_at
+        FROM orders
+        WHERE order_id=?
+        """,
         (order_id,),
     ).fetchone()
     con.close()
@@ -491,7 +519,78 @@ def get_order_payload(order_id: str) -> Optional[dict]:
     payload = json.loads(row["payload_json"])
     payload["_amount"] = row["amount"]
     payload["_created_at"] = row["created_at"]
+    payload["_moysklad_demand_href"] = row["moysklad_demand_href"]
+    payload["_moysklad_sync_status"] = row["moysklad_sync_status"]
+    payload["_moysklad_sync_error"] = row["moysklad_sync_error"]
+    payload["_moysklad_synced_at"] = row["moysklad_synced_at"]
     return payload
+
+
+def claim_moysklad_sync(order_id: str) -> Optional[str]:
+    ensure_orders_columns()
+    con = db()
+    cur = con.cursor()
+    cur.execute("BEGIN IMMEDIATE")
+    row = cur.execute(
+        """
+        SELECT moysklad_demand_href, moysklad_sync_status
+        FROM orders
+        WHERE order_id=?
+        """,
+        (order_id,),
+    ).fetchone()
+    if not row:
+        con.rollback()
+        con.close()
+        return "missing"
+    demand_href = str(row["moysklad_demand_href"] or "").strip()
+    sync_status = str(row["moysklad_sync_status"] or "").strip().lower()
+    if demand_href:
+        con.commit()
+        con.close()
+        return "done"
+    if sync_status == "in_progress":
+        con.commit()
+        con.close()
+        return "in_progress"
+    cur.execute(
+        """
+        UPDATE orders
+        SET moysklad_sync_status='in_progress',
+            moysklad_sync_error='',
+            updated_at=datetime('now')
+        WHERE order_id=?
+        """,
+        (order_id,),
+    )
+    con.commit()
+    con.close()
+    return None
+
+
+def finish_moysklad_sync(order_id: str, *, demand_href: str = "", error: str = "") -> None:
+    ensure_orders_columns()
+    con = db()
+    con.execute(
+        """
+        UPDATE orders
+        SET moysklad_demand_href=?,
+            moysklad_sync_status=?,
+            moysklad_sync_error=?,
+            moysklad_synced_at=CASE WHEN ? <> '' THEN datetime('now') ELSE moysklad_synced_at END,
+            updated_at=datetime('now')
+        WHERE order_id=?
+        """,
+        (
+            demand_href,
+            "done" if demand_href else "error",
+            error[:1000],
+            demand_href,
+            order_id,
+        ),
+    )
+    con.commit()
+    con.close()
 
 
 def get_product_name_map(skus: list[str]) -> dict[str, str]:
@@ -641,9 +740,41 @@ def sync_leadteh_products() -> dict:
     return {"ok": True, "updated": updated, "created": created, "skipped": skipped}
 
 
-def push_products_to_leadteh() -> dict:
+def _inventory_rows_for_skus(skus: Optional[list[str]] = None) -> list[sqlite3.Row]:
+    con = db()
+    try:
+        if skus:
+            normalized = [str(sku).strip() for sku in skus if str(sku).strip()]
+            if not normalized:
+                return []
+            placeholders = ",".join("?" for _ in normalized)
+            rows = con.execute(
+                f"""
+                SELECT sku, name, price, weight, shelf_life, description, image_url, badge, sort, active, stock
+                FROM inventory
+                WHERE sku IN ({placeholders})
+                """,
+                normalized,
+            ).fetchall()
+            return rows
+
+        rows = con.execute(
+            """
+            SELECT sku, name, price, weight, shelf_life, description, image_url, badge, sort, active, stock
+            FROM inventory
+            """
+        ).fetchall()
+        return rows
+    finally:
+        con.close()
+
+
+def _push_inventory_rows_to_leadteh(rows: list[sqlite3.Row]) -> dict:
     if not _leadteh_products_enabled():
         raise HTTPException(500, "Set LEADTEH_API_TOKEN and LEADTEH_PRODUCTS_SCHEMA_ID in backend/.env")
+
+    if not rows:
+        return {"ok": True, "created": 0, "updated": 0}
 
     existing = _leadteh_get_list_items(LEADTEH_PRODUCTS_SCHEMA_ID)
     sku_to_id = {}
@@ -652,15 +783,6 @@ def push_products_to_leadteh() -> dict:
         item_id = item.get("id") or item.get("_id")
         if sku and item_id:
             sku_to_id[sku] = item_id
-
-    con = db()
-    rows = con.execute(
-        """
-        SELECT sku, name, price, weight, shelf_life, description, image_url, badge, sort, active, stock
-        FROM inventory
-        """
-    ).fetchall()
-    con.close()
 
     created = 0
     updated = 0
@@ -700,6 +822,138 @@ def push_products_to_leadteh() -> dict:
             time.sleep(0.6)
 
     return {"ok": True, "created": created, "updated": updated}
+
+
+def push_products_to_leadteh() -> dict:
+    return _push_inventory_rows_to_leadteh(_inventory_rows_for_skus())
+
+
+def _sync_order_stocks_to_leadteh_sync(order_id: str) -> None:
+    if not _leadteh_products_enabled():
+        return
+
+    payload = get_order_payload(order_id)
+    if not payload:
+        return
+
+    skus = []
+    seen = set()
+    for item in payload.get("items") or []:
+        sku = str(item.get("sku") or "").strip()
+        if not sku or sku in seen:
+            continue
+        seen.add(sku)
+        skus.append(sku)
+
+    rows = _inventory_rows_for_skus(skus)
+    result = _push_inventory_rows_to_leadteh(rows)
+    print("Leadteh stock sync:", order_id, result)
+
+
+async def sync_order_stocks_to_leadteh(order_id: str) -> None:
+    try:
+        await asyncio.to_thread(_sync_order_stocks_to_leadteh_sync, order_id)
+    except Exception as e:
+        print("Leadteh stock sync error:", repr(e))
+
+
+def _sync_order_stocks_to_moysklad_sync(order_id: str) -> None:
+    if not _moysklad_enabled():
+        return
+
+    claim_state = claim_moysklad_sync(order_id)
+    if claim_state in ("done", "in_progress"):
+        return
+    if claim_state == "missing":
+        raise ValueError(f"Order not found: {order_id}")
+
+    payload = get_order_payload(order_id)
+    if not payload:
+        finish_moysklad_sync(order_id, error="Order payload not found")
+        return
+
+    sku_qty: dict[str, int] = {}
+    for item in payload.get("items") or []:
+        sku = str(item.get("sku") or "").strip()
+        qty = int(item.get("qty") or 0)
+        if not sku or qty <= 0:
+            continue
+        sku_qty[sku] = sku_qty.get(sku, 0) + qty
+
+    if not sku_qty:
+        finish_moysklad_sync(order_id, error="Order has no items for MoySklad sync")
+        return
+
+    con = db()
+    placeholders = ",".join("?" for _ in sku_qty)
+    rows = con.execute(
+        f"""
+        SELECT sku, name, price, moysklad_href
+        FROM inventory
+        WHERE sku IN ({placeholders})
+        """,
+        list(sku_qty.keys()),
+    ).fetchall()
+    con.close()
+
+    row_map = {str(row["sku"]): row for row in rows}
+    missing_skus = [sku for sku in sku_qty if sku not in row_map]
+    unmapped_skus = [sku for sku, row in row_map.items() if not _moysklad_string(row["moysklad_href"])]
+    if missing_skus:
+        finish_moysklad_sync(order_id, error=f"Inventory rows not found for MoySklad sync: {', '.join(missing_skus)}")
+        return
+    if unmapped_skus:
+        finish_moysklad_sync(order_id, error=f"Missing moysklad_href for SKU: {', '.join(unmapped_skus)}")
+        return
+
+    try:
+        with httpx.Client() as client:
+            organization_href, store_href = _moysklad_document_context(client)
+            positions = []
+            for sku, qty in sku_qty.items():
+                row = row_map[sku]
+                positions.append(
+                    {
+                        "quantity": qty,
+                        "price": max(int(row["price"] or 0), 0) * 100,
+                        "assortment": _moysklad_meta(_moysklad_string(row["moysklad_href"]), "product"),
+                    }
+                )
+
+            customer = payload.get("customer") or {}
+            delivery = payload.get("delivery") or {}
+            demand_body = {
+                "applicable": True,
+                "moment": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "organization": _moysklad_meta(organization_href, "organization"),
+                "store": _moysklad_meta(store_href, "store"),
+                "description": (
+                    f"Оплаченный заказ miniapp {order_id}. "
+                    f"Клиент: {customer.get('name') or '-'}, "
+                    f"телефон: {customer.get('phone') or '-'}, "
+                    f"доставка: {delivery.get('method') or '-'}."
+                ),
+                "positions": positions,
+            }
+            result = _moysklad_request(client, "POST", "/entity/demand", json_body=demand_body)
+    except Exception as exc:
+        finish_moysklad_sync(order_id, error=repr(exc))
+        raise
+
+    demand_href = _moysklad_meta_href(result)
+    if not demand_href:
+        finish_moysklad_sync(order_id, error="MoySklad demand created without meta href")
+        return
+
+    finish_moysklad_sync(order_id, demand_href=demand_href)
+    print("MoySklad stock sync:", order_id, demand_href)
+
+
+async def sync_order_stocks_to_moysklad(order_id: str) -> None:
+    try:
+        await asyncio.to_thread(_sync_order_stocks_to_moysklad_sync, order_id)
+    except Exception as e:
+        print("MoySklad stock sync error:", repr(e))
 
 
 def _moysklad_enabled() -> bool:
@@ -783,6 +1037,59 @@ def _moysklad_get_rows(
         if len(chunk) < limit:
             break
     return rows
+
+
+def _moysklad_meta(href: str, type_name: str) -> dict:
+    return {
+        "meta": {
+            "href": href,
+            "type": type_name,
+            "mediaType": "application/json",
+        }
+    }
+
+
+def _moysklad_meta_href(value: Any) -> str:
+    if isinstance(value, dict):
+        meta = value.get("meta") or {}
+        href = _moysklad_string(meta.get("href"))
+        if href:
+            return href
+        return _moysklad_string(value.get("href"))
+    return _moysklad_string(value)
+
+
+def _moysklad_first_entity_href(client: httpx.Client, path: str) -> str:
+    rows = _moysklad_get_rows(client, path, limit=1)
+    if not rows:
+        return ""
+    return _moysklad_meta_href(rows[0])
+
+
+def _moysklad_document_context(client: httpx.Client) -> tuple[str, str]:
+    organization_href = MOYSKLAD_ORGANIZATION_HREF
+    store_href = MOYSKLAD_STORE_HREF
+
+    try:
+        metadata = _moysklad_request(client, "GET", "/entity/demand/metadata")
+    except Exception:
+        metadata = {}
+
+    if not organization_href:
+        organization_href = _moysklad_meta_href(metadata.get("organization"))
+    if not store_href:
+        store_href = _moysklad_meta_href(metadata.get("store"))
+    if not organization_href:
+        organization_href = _moysklad_first_entity_href(client, "/entity/organization")
+    if not store_href:
+        store_href = _moysklad_first_entity_href(client, "/entity/store")
+
+    if not organization_href:
+        raise ValueError("MoySklad organization not found. Set MOYSKLAD_ORGANIZATION_HREF in backend/.env")
+    if not store_href:
+        raise ValueError("MoySklad store not found. Set MOYSKLAD_STORE_HREF in backend/.env")
+
+    return organization_href, store_href
 
 
 def _moysklad_string(value: Any) -> str:
@@ -1793,11 +2100,11 @@ async def prodamus_webhook(request: Request):
             mark_reservation_paid_and_deduct_stock(order_uuid)
             set_order_status(order_uuid, "paid")
             asyncio.create_task(send_to_leadteh(order_uuid))
+            asyncio.create_task(sync_order_stocks_to_leadteh(order_uuid))
+            asyncio.create_task(sync_order_stocks_to_moysklad(order_uuid))
         else:
             release_reservation(order_uuid, reason=payment_status or "released")
             set_order_status(order_uuid, payment_status or "unknown")
-
-            set_order_status(order_uuid, "paid")
     except Exception as e:
         print("DB ERROR:", repr(e))
         raise HTTPException(500, f"DB error: {repr(e)}")
