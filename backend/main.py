@@ -1427,6 +1427,81 @@ def _normalize_phone(raw: str) -> str:
     return ""
 
 
+def _leadteh_phone_key(raw: str) -> str:
+    digits = re.sub(r"\D+", "", raw or "")
+    if len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+    return digits
+
+
+def _leadteh_email_key(raw: str) -> str:
+    return str(raw or "").strip().lower()
+
+
+def _leadteh_get_contacts_page(client: httpx.Client, page: int, count: int = 500) -> dict:
+    r = client.get(
+        "https://app.leadteh.ru/api/v1/getContacts",
+        params={
+            "api_token": LEADTEH_API_TOKEN,
+            "bot_id": LEADTEH_BOT_ID,
+            "page": page,
+            "count": count,
+        },
+        headers={"X-Requested-With": "XMLHttpRequest"},
+        timeout=20,
+    )
+    try:
+        return r.json()
+    except Exception:
+        return {"_status": r.status_code, "_text": r.text}
+
+
+def _leadteh_find_contact_by_phone_or_email(client: httpx.Client, phone: str, email: str) -> Optional[int]:
+    phone_key = _leadteh_phone_key(phone)
+    email_key = _leadteh_email_key(email)
+    if not phone_key and not email_key:
+        return None
+
+    page = 1
+    email_match: Optional[int] = None
+
+    while True:
+        data = _leadteh_get_contacts_page(client, page=page)
+        rows = data.get("data") or []
+        if not isinstance(rows, list):
+            rows = []
+
+        for row in rows:
+            try:
+                contact_id = int(row.get("id"))
+            except Exception:
+                continue
+
+            row_phone = _leadteh_phone_key(str(row.get("phone") or ""))
+            row_email = _leadteh_email_key(row.get("email") or "")
+
+            if phone_key and row_phone and row_phone == phone_key:
+                return contact_id
+            if email_key and row_email and row_email == email_key and email_match is None:
+                email_match = contact_id
+
+        meta = data.get("meta") or {}
+        try:
+            current_page = int(meta.get("current_page") or page)
+        except Exception:
+            current_page = page
+        try:
+            last_page = int(meta.get("last_page") or current_page)
+        except Exception:
+            last_page = current_page
+
+        if not rows or current_page >= last_page:
+            break
+        page = current_page + 1
+
+    return email_match
+
+
 def _leadteh_set_variable_sync(client: httpx.Client, contact_id: int, name: str, value: str) -> None:
     r = client.post(
         "https://app.leadteh.ru/api/v1/setContactVariable",
@@ -1455,13 +1530,10 @@ def _send_to_leadteh_sync(order_id: str) -> None:
     delivery = payload.get("delivery") or {}
     items = payload.get("items") or []
     messenger_platform = str(payload.get("messenger_platform") or ("telegram" if payload.get("telegram_id") else "")).lower()
+    messenger_user_id = str(payload.get("messenger_user_id") or "").strip()
+    messenger_username = str(payload.get("messenger_username") or "").strip()
     telegram_id = payload.get("telegram_id")
     telegram_username = payload.get("telegram_username")
-
-    if messenger_platform and messenger_platform != "telegram":
-        return
-    if not telegram_id:
-        return
 
     skus = [str(it.get("sku")) for it in items if it.get("sku")]
     name_map = get_product_name_map(skus)
@@ -1473,37 +1545,67 @@ def _send_to_leadteh_sync(order_id: str) -> None:
 
     with httpx.Client() as client:
         phone = _normalize_phone(customer.get("phone", ""))
-        data_items = {
-            "bot_id": LEADTEH_BOT_ID,
-            "messenger": "telegram",
-            "name": customer.get("name", "") or "Клиент",
-            "email": customer.get("email", ""),
-            "telegram_id": str(telegram_id),
-            "telegram_username": telegram_username or "",
-            "address": delivery.get("pickup_point", ""),
-            "tags[]": "Оплата прошла",
-        }
-        if phone:
-            data_items["phone"] = phone
+        contact_id = None
+        contact_debug: Any = {}
 
-        r = client.post(
-            "https://app.leadteh.ru/api/v1/createOrUpdateContact",
-            params={"api_token": LEADTEH_API_TOKEN},
-            data=data_items,
-            headers={"X-Requested-With": "XMLHttpRequest"},
-            timeout=10,
-        )
-        print("Leadteh createOrUpdate:", r.status_code, (r.text or "")[:200])
-        try:
-            data = r.json()
-        except Exception:
-            data = {}
-        contact_id = data.get("data", {}).get("id")
+        if messenger_platform == "telegram" and telegram_id:
+            data_items = {
+                "bot_id": LEADTEH_BOT_ID,
+                "messenger": "telegram",
+                "name": customer.get("name", "") or "Клиент",
+                "email": customer.get("email", ""),
+                "telegram_id": str(telegram_id),
+                "telegram_username": telegram_username or "",
+                "address": delivery.get("pickup_point", ""),
+                "tags[]": "Оплата прошла",
+            }
+            if phone:
+                data_items["phone"] = phone
+
+            r = client.post(
+                "https://app.leadteh.ru/api/v1/createOrUpdateContact",
+                params={"api_token": LEADTEH_API_TOKEN},
+                data=data_items,
+                headers={"X-Requested-With": "XMLHttpRequest"},
+                timeout=10,
+            )
+            print("Leadteh createOrUpdate:", r.status_code, (r.text or "")[:200])
+            try:
+                data = r.json()
+            except Exception:
+                data = {}
+            contact_debug = data
+            contact_id = data.get("data", {}).get("id")
+        elif messenger_platform == "max":
+            contact_id = _leadteh_find_contact_by_phone_or_email(
+                client,
+                phone,
+                customer.get("email", ""),
+            )
+            contact_debug = {
+                "phone": phone,
+                "email": customer.get("email", ""),
+                "contact_id": contact_id,
+            }
+            print(
+                "Leadteh MAX contact lookup:",
+                contact_debug,
+            )
+        else:
+            return
+
         if not contact_id:
-            print("Leadteh: no contact_id in response", data)
+            print("Leadteh: no contact_id in response", contact_debug)
             return
 
         variables = [
+            ("customer_name", customer.get("name", "")),
+            ("customer_email", customer.get("email", "")),
+            ("customer_phone", phone or customer.get("phone", "")),
+            ("customer_address", delivery.get("pickup_point", "")),
+            ("messenger_platform", messenger_platform),
+            ("messenger_user_id", messenger_user_id),
+            ("messenger_username", messenger_username or (telegram_username or "")),
             ("order_id", order_id),
             ("amount", str(payload.get("_amount", ""))),
             ("items", items_text),
