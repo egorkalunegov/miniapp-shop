@@ -639,7 +639,7 @@ def _safe_product_upload_name(filename: str) -> str:
     return f"{uuid.uuid4().hex}{ext}"
 
 
-def upsert_product_card(payload: ProductCardUpsert) -> None:
+def upsert_product_card(payload: "ProductCardUpsert") -> None:
     ensure_inventory_columns()
     con = db()
     cur = con.cursor()
