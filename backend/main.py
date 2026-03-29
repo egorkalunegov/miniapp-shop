@@ -79,9 +79,17 @@ FIXED_PRODUCT_SORTS = {
     "CHOCO_RASPBERRY_NUTS_JESUS": 10,
 }
 
+LOCAL_CATALOG_OVERRIDE_SKUS = {
+    "GIFT_BOX_LOVED",
+}
+
 
 def _fixed_sort_for_sku(sku: str, fallback: int = 0) -> int:
     return FIXED_PRODUCT_SORTS.get((sku or "").strip(), fallback)
+
+
+def _preserve_local_catalog_fields(sku: str) -> bool:
+    return (sku or "").strip() in LOCAL_CATALOG_OVERRIDE_SKUS
 
 # ---- сиды каталога (пока Leadteh не настроен) ----
 SEED_PRODUCTS = [
@@ -1295,12 +1303,13 @@ def sync_moysklad_products() -> dict:
 
             existing = cur.execute(
                 """
-                SELECT sku, stock, weight, shelf_life, description, image_url, badge, sort, active
+                SELECT sku, name, price, stock, weight, shelf_life, description, image_url, badge, sort, active
                 FROM inventory
                 WHERE sku=?
                 """,
                 (sku,),
             ).fetchone()
+            preserve_local_catalog = bool(existing and _preserve_local_catalog_fields(sku))
 
             attr_weight = _moysklad_attr_value(item, MOYSKLAD_ATTR_WEIGHT)
             attr_shelf_life = _moysklad_attr_value(item, MOYSKLAD_ATTR_SHELF_LIFE)
@@ -1309,6 +1318,10 @@ def sync_moysklad_products() -> dict:
             attr_active = _moysklad_attr_value(item, MOYSKLAD_ATTR_ACTIVE)
             attr_image_url = _moysklad_attr_value(item, MOYSKLAD_ATTR_IMAGE_URL)
 
+            name_value = name
+            if preserve_local_catalog:
+                name_value = _moysklad_string(existing["name"]) or name
+
             weight_value = attr_weight or ""
             if not weight_value:
                 standard_weight = _moysklad_int_or_none(item.get("weight"))
@@ -1316,9 +1329,14 @@ def sync_moysklad_products() -> dict:
                     weight_value = f"{standard_weight} г"
             if not weight_value and existing:
                 weight_value = _moysklad_string(existing["weight"])
+            if preserve_local_catalog:
+                weight_value = _moysklad_string(existing["weight"]) or weight_value
 
             shelf_life_value = attr_shelf_life or (_moysklad_string(existing["shelf_life"]) if existing else "")
             badge_value = attr_badge or (_moysklad_string(existing["badge"]) if existing else "")
+            if preserve_local_catalog:
+                shelf_life_value = _moysklad_string(existing["shelf_life"]) or shelf_life_value
+                badge_value = _moysklad_string(existing["badge"]) or badge_value
 
             sort_value = _moysklad_int_or_none(attr_sort)
             if sort_value is None:
@@ -1337,7 +1355,9 @@ def sync_moysklad_products() -> dict:
 
             existing_image_url = _moysklad_string(existing["image_url"]) if existing else ""
             image_href = _moysklad_image_href(item)
-            if existing_image_url and _is_local_storefront_image_url(existing_image_url) and not attr_image_url:
+            if preserve_local_catalog:
+                image_url = existing_image_url or attr_image_url or _moysklad_proxy_image_url(image_href)
+            elif existing_image_url and _is_local_storefront_image_url(existing_image_url) and not attr_image_url:
                 image_url = existing_image_url
             else:
                 image_url = attr_image_url or _moysklad_proxy_image_url(image_href) or existing_image_url
@@ -1345,9 +1365,13 @@ def sync_moysklad_products() -> dict:
             description_value = _moysklad_string(item.get("description"))
             if not description_value and existing:
                 description_value = _moysklad_string(existing["description"])
+            if preserve_local_catalog:
+                description_value = _moysklad_string(existing["description"]) or description_value
 
             moysklad_href = _moysklad_string(((item.get("meta") or {}).get("href")))
             price_value = _moysklad_price(item)
+            if preserve_local_catalog:
+                price_value = _moysklad_int(existing["price"]) or price_value
 
             if existing:
                 cur.execute(
@@ -1358,7 +1382,7 @@ def sync_moysklad_products() -> dict:
                     WHERE sku=?
                     """,
                     (
-                        name,
+                        name_value,
                         price_value,
                         weight_value,
                         shelf_life_value,
