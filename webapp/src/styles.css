@@ -334,6 +334,13 @@ body {
   gap: 16px;
 }
 
+.adminEditorAside {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+}
+
 .adminPreview {
   width: 96px;
   height: 96px;
@@ -510,6 +517,9 @@ textarea {
   }
   .adminEditorTop {
     flex-direction: column;
+  }
+  .adminEditorAside {
+    align-items: flex-start;
   }
   .media {
     height: 150px;

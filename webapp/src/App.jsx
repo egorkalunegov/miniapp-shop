@@ -81,6 +81,7 @@ export default function App() {
   const [adminCardUploading, setAdminCardUploading] = useState(false);
   const [adminCardMsg, setAdminCardMsg] = useState("");
   const [adminCardMode, setAdminCardMode] = useState("edit");
+  const [adminCardOpen, setAdminCardOpen] = useState(false);
   const [lastOrder, setLastOrder] = useState(null);
 
   const [name, setName] = useState("");
@@ -122,14 +123,6 @@ export default function App() {
     });
     setAdminStocks(stocks);
   }, [adminRoute, products]);
-
-  useEffect(() => {
-    if (!adminRoute || !adminAuth) return;
-    if (adminCardDraft.sku) return;
-    if (!products.length) return;
-    setAdminCardDraft(productToAdminCardDraft(products[0]));
-    setAdminCardMode("edit");
-  }, [adminRoute, adminAuth, products, adminCardDraft.sku]);
 
   const productMap = useMemo(() => {
     const map = {};
@@ -297,12 +290,19 @@ export default function App() {
     setAdminCardMode("create");
     setAdminCardMsg("");
     setAdminCardDraft(emptyAdminCardDraft());
+    setAdminCardOpen(true);
   }
 
   function startEditCard(product) {
     setAdminCardMode("edit");
     setAdminCardMsg("");
     setAdminCardDraft(productToAdminCardDraft(product));
+    setAdminCardOpen(true);
+  }
+
+  function closeAdminCard() {
+    setAdminCardOpen(false);
+    setAdminCardMsg("");
   }
 
   function updateAdminCardField(field, value) {
@@ -345,6 +345,7 @@ export default function App() {
       await loadProducts();
       setAdminCardMode("edit");
       setAdminCardMsg("Карточка сохранена.");
+      setAdminCardOpen(true);
     } catch (e) {
       setAdminError(String(e?.message || e));
     } finally {
@@ -464,24 +465,25 @@ export default function App() {
               а локально сохраненные карточки не перетираются синком.
             </div>
             <div className="adminActions">
-              <button className="openBtn" onClick={syncFromMoySklad} disabled={adminMoySkladSyncing}>
+              <button type="button" className="openBtn" onClick={syncFromMoySklad} disabled={adminMoySkladSyncing}>
                 {adminMoySkladSyncing ? "Синхронизация..." : "Синхронизировать из МойСклад"}
               </button>
-              <button className="openBtn" onClick={syncFromLeadteh} disabled={adminSyncing}>
+              <button type="button" className="openBtn" onClick={syncFromLeadteh} disabled={adminSyncing}>
                 {adminSyncing ? "Синхронизация..." : "Синхронизировать из Leadteh"}
               </button>
-              <button className="openBtn" onClick={pushToLeadteh} disabled={adminPushing}>
+              <button type="button" className="openBtn" onClick={pushToLeadteh} disabled={adminPushing}>
                 {adminPushing ? "Выгрузка..." : "Выгрузить в Leadteh"}
               </button>
-              <button className="openBtn" onClick={seedFromTemplate} disabled={adminSeeding}>
+              <button type="button" className="openBtn" onClick={seedFromTemplate} disabled={adminSeeding}>
                 {adminSeeding ? "Восстановление..." : "Восстановить карточки"}
               </button>
-              <button className="openBtn" onClick={startCreateCard}>
+              <button type="button" className="openBtn" onClick={startCreateCard}>
                 Добавить карточку
               </button>
             </div>
             {adminPushMsg && <div className="muted">{adminPushMsg}</div>}
 
+            {adminCardOpen && (
             <div className="adminEditor">
               <div className="adminEditorTop">
                 <div>
@@ -490,9 +492,14 @@ export default function App() {
                     Сохраняется локальная карточка. Остатки дальше можно синхронизировать отдельно.
                   </div>
                 </div>
-                {adminCardDraft.imageUrl && (
-                  <img className="adminPreview" src={adminCardDraft.imageUrl} alt={adminCardDraft.name || "preview"} />
-                )}
+                <div className="adminEditorAside">
+                  {adminCardDraft.imageUrl && (
+                    <img className="adminPreview" src={adminCardDraft.imageUrl} alt={adminCardDraft.name || "preview"} />
+                  )}
+                  <button type="button" className="openBtn" onClick={closeAdminCard}>
+                    Закрыть
+                  </button>
+                </div>
               </div>
 
               <div className="adminGrid">
@@ -578,15 +585,20 @@ export default function App() {
               </label>
 
               <div className="adminActions">
-                <button className="payBtn adminSaveBtn" onClick={saveAdminCard} disabled={adminCardSaving || adminCardUploading}>
+                <button type="button" className="payBtn adminSaveBtn" onClick={saveAdminCard} disabled={adminCardSaving || adminCardUploading}>
                   {adminCardSaving ? "Сохраняем карточку..." : "Сохранить карточку"}
                 </button>
-                <button className="openBtn" onClick={() => startEditCard(products[0])} disabled={!products.length}>
-                  Сбросить форму
+                <button
+                  type="button"
+                  className="openBtn"
+                  onClick={() => (adminCardMode === "create" ? setAdminCardDraft(emptyAdminCardDraft()) : closeAdminCard())}
+                >
+                  {adminCardMode === "create" ? "Очистить форму" : "Закрыть"}
                 </button>
               </div>
               {adminCardUploading && <div className="muted">Загрузка картинки...</div>}
             </div>
+            )}
 
             <div className="adminList">
               {products.map((p) => (
@@ -611,7 +623,7 @@ export default function App() {
                         setAdminStocks((s) => ({ ...s, [p.sku]: e.target.value }))
                       }
                     />
-                    <button className="openBtn" onClick={() => startEditCard(p)}>
+                    <button type="button" className="openBtn" onClick={() => startEditCard(p)}>
                       Редактировать
                     </button>
                   </div>
