@@ -7,13 +7,15 @@ import uuid
 import re
 import asyncio
 import time
+import shutil
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Request, HTTPException, Response, status
+from fastapi import Depends, FastAPI, Request, HTTPException, Response, UploadFile, File, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 import secrets
@@ -65,6 +67,8 @@ if PRODAMUS_FORM_URL and not PRODAMUS_FORM_URL.endswith("/"):
     PRODAMUS_FORM_URL += "/"
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "app.db")
+UPLOADS_DIR = os.path.join(os.path.dirname(__file__), "uploads")
+PRODUCT_UPLOADS_DIR = os.path.join(UPLOADS_DIR, "products")
 
 FIXED_PRODUCT_SORTS = {
     "GIFT_BOX_LOVED": 1,
@@ -90,6 +94,12 @@ def _fixed_sort_for_sku(sku: str, fallback: int = 0) -> int:
 
 def _preserve_local_catalog_fields(sku: str) -> bool:
     return (sku or "").strip() in LOCAL_CATALOG_OVERRIDE_SKUS
+
+
+def _catalog_override_enabled(row: Optional[sqlite3.Row], sku: str) -> bool:
+    if row and int(row["catalog_override"] or 0) == 1:
+        return True
+    return _preserve_local_catalog_fields(sku)
 
 # ---- сиды каталога (пока Leadteh не настроен) ----
 SEED_PRODUCTS = [
@@ -217,6 +227,7 @@ def db() -> sqlite3.Connection:
 
 
 def init_db() -> None:
+    os.makedirs(PRODUCT_UPLOADS_DIR, exist_ok=True)
     con = db()
     cur = con.cursor()
     cur.execute(
@@ -305,6 +316,7 @@ def ensure_inventory_columns() -> None:
     add_col("badge", "TEXT", "''")
     add_col("sort", "INTEGER", "0")
     add_col("active", "INTEGER", "1")
+    add_col("catalog_override", "INTEGER", "1")
     add_col("moysklad_href", "TEXT", "''")
     add_col("moysklad_image_href", "TEXT", "''")
 
@@ -332,8 +344,8 @@ def seed_products(insert_only: bool = True) -> None:
             cur.execute(
                 """
                 INSERT OR IGNORE INTO inventory
-                (sku, name, stock, reserved, price, weight, shelf_life, description, image_url, badge, sort, active)
-                VALUES (?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+                (sku, name, stock, reserved, price, weight, shelf_life, description, image_url, badge, sort, active, catalog_override)
+                VALUES (?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                 """,
                 params,
             )
@@ -341,8 +353,8 @@ def seed_products(insert_only: bool = True) -> None:
             cur.execute(
                 """
                 INSERT INTO inventory
-                (sku, name, stock, reserved, price, weight, shelf_life, description, image_url, badge, sort, active)
-                VALUES (?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+                (sku, name, stock, reserved, price, weight, shelf_life, description, image_url, badge, sort, active, catalog_override)
+                VALUES (?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                 ON CONFLICT(sku) DO UPDATE SET
                   name=excluded.name,
                   price=excluded.price,
@@ -352,7 +364,8 @@ def seed_products(insert_only: bool = True) -> None:
                   image_url=excluded.image_url,
                   badge=excluded.badge,
                   sort=excluded.sort,
-                  active=excluded.active
+                  active=excluded.active,
+                  catalog_override=1
                 """,
                 params,
             )
@@ -614,6 +627,71 @@ def get_product_name_map(skus: list[str]) -> dict[str, str]:
     return {r["sku"]: r["name"] for r in rows}
 
 
+def _product_upload_public_url(filename: str) -> str:
+    base = PUBLIC_BASE_URL.rstrip("/") if PUBLIC_BASE_URL else "http://127.0.0.1:8000"
+    return f"{base}/uploads/products/{filename}"
+
+
+def _safe_product_upload_name(filename: str) -> str:
+    ext = os.path.splitext(filename or "")[1].lower()
+    if ext not in (".jpg", ".jpeg", ".png", ".webp"):
+        raise HTTPException(400, "Поддерживаются только .jpg, .jpeg, .png, .webp")
+    return f"{uuid.uuid4().hex}{ext}"
+
+
+def upsert_product_card(payload: ProductCardUpsert) -> None:
+    ensure_inventory_columns()
+    con = db()
+    cur = con.cursor()
+    cur.execute("BEGIN IMMEDIATE")
+
+    existing = cur.execute("SELECT sku, stock, reserved FROM inventory WHERE sku=?", (payload.sku,)).fetchone()
+    if existing:
+        cur.execute(
+            """
+            UPDATE inventory
+            SET name=?, price=?, weight=?, shelf_life=?, description=?, image_url=?,
+                badge=?, sort=?, active=?, catalog_override=1
+            WHERE sku=?
+            """,
+            (
+                payload.name.strip(),
+                int(payload.price),
+                payload.weight.strip(),
+                payload.shelfLife.strip(),
+                payload.description.strip(),
+                payload.imageUrl.strip(),
+                payload.badge.strip(),
+                int(payload.sort),
+                int(payload.active),
+                payload.sku.strip(),
+            ),
+        )
+    else:
+        cur.execute(
+            """
+            INSERT INTO inventory
+            (sku, name, stock, reserved, price, weight, shelf_life, description, image_url, badge, sort, active, catalog_override)
+            VALUES (?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+            """,
+            (
+                payload.sku.strip(),
+                payload.name.strip(),
+                int(payload.price),
+                payload.weight.strip(),
+                payload.shelfLife.strip(),
+                payload.description.strip(),
+                payload.imageUrl.strip(),
+                payload.badge.strip(),
+                int(payload.sort),
+                int(payload.active),
+            ),
+        )
+
+    con.commit()
+    con.close()
+
+
 def _leadteh_enabled() -> bool:
     return bool(LEADTEH_API_TOKEN and LEADTEH_BOT_ID)
 
@@ -720,8 +798,24 @@ def sync_leadteh_products() -> dict:
         sort = _leadteh_int(item.get("sort"))
         active = _leadteh_bool(item.get("active", 1))
 
-        row = cur.execute("SELECT sku FROM inventory WHERE sku=?", (sku,)).fetchone()
+        row = cur.execute(
+            """
+            SELECT sku, name, price, weight, shelf_life, description, image_url, badge, sort, active, catalog_override
+            FROM inventory
+            WHERE sku=?
+            """,
+            (sku,),
+        ).fetchone()
+        preserve_local_catalog = _catalog_override_enabled(row, sku)
         if row:
+            name_value = _leadteh_str(row["name"]) if preserve_local_catalog else name
+            price_value = _leadteh_int(row["price"]) if preserve_local_catalog else price
+            weight_value = _leadteh_str(row["weight"]) if preserve_local_catalog else weight
+            shelf_life_value = _leadteh_str(row["shelf_life"]) if preserve_local_catalog else shelf_life
+            description_value = _leadteh_str(row["description"]) if preserve_local_catalog else description
+            image_url_value = _leadteh_str(row["image_url"]) if preserve_local_catalog else image_url
+            badge_value = _leadteh_str(row["badge"]) if preserve_local_catalog else badge
+            sort_value = _leadteh_int(row["sort"]) if preserve_local_catalog else sort
             cur.execute(
                 """
                 UPDATE inventory
@@ -729,15 +823,27 @@ def sync_leadteh_products() -> dict:
                     badge=?, stock=?, sort=?, active=?
                 WHERE sku=?
                 """,
-                (name, price, weight, shelf_life, description, image_url, badge, stock, sort, active, sku),
+                (
+                    name_value,
+                    price_value,
+                    weight_value,
+                    shelf_life_value,
+                    description_value,
+                    image_url_value,
+                    badge_value,
+                    stock,
+                    sort_value,
+                    active,
+                    sku,
+                ),
             )
             updated += 1
         else:
             cur.execute(
                 """
                 INSERT INTO inventory
-                (sku, name, stock, reserved, price, weight, shelf_life, description, image_url, badge, sort, active)
-                VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+                (sku, name, stock, reserved, price, weight, shelf_life, description, image_url, badge, sort, active, catalog_override)
+                VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 0)
                 """,
                 (sku, name, stock, price, weight, shelf_life, description, image_url, badge, sort, active),
             )
@@ -1303,13 +1409,13 @@ def sync_moysklad_products() -> dict:
 
             existing = cur.execute(
                 """
-                SELECT sku, name, price, stock, weight, shelf_life, description, image_url, badge, sort, active
+                SELECT sku, name, price, stock, weight, shelf_life, description, image_url, badge, sort, active, catalog_override
                 FROM inventory
                 WHERE sku=?
                 """,
                 (sku,),
             ).fetchone()
-            preserve_local_catalog = bool(existing and _preserve_local_catalog_fields(sku))
+            preserve_local_catalog = _catalog_override_enabled(existing, sku)
 
             attr_weight = _moysklad_attr_value(item, MOYSKLAD_ATTR_WEIGHT)
             attr_shelf_life = _moysklad_attr_value(item, MOYSKLAD_ATTR_SHELF_LIFE)
@@ -1402,8 +1508,8 @@ def sync_moysklad_products() -> dict:
                 cur.execute(
                     """
                     INSERT INTO inventory
-                    (sku, name, stock, reserved, price, weight, shelf_life, description, image_url, badge, sort, active, moysklad_href, moysklad_image_href)
-                    VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (sku, name, stock, reserved, price, weight, shelf_life, description, image_url, badge, sort, active, catalog_override, moysklad_href, moysklad_image_href)
+                    VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
                     """,
                     (
                         sku,
@@ -1958,6 +2064,19 @@ class InventoryUpdateBulk(BaseModel):
     items: List[InventoryUpdate]
 
 
+class ProductCardUpsert(BaseModel):
+    sku: str
+    name: str
+    price: int = Field(ge=0)
+    weight: str = ""
+    shelfLife: str = ""
+    description: str = ""
+    imageUrl: str = ""
+    badge: str = ""
+    sort: int = 0
+    active: int = Field(default=1, ge=0, le=1)
+
+
 # ---------------------------
 # Create order -> Prodamus payment link
 # ---------------------------
@@ -2283,6 +2402,7 @@ def get_products():
           badge,
           sort,
           active,
+          catalog_override AS catalogOverride,
           stock,
           reserved,
           (stock - reserved) AS available
@@ -2292,6 +2412,39 @@ def get_products():
     ).fetchall()
     con.close()
     return [dict(r) for r in rows]
+
+
+@app.get("/uploads/products/{filename}")
+def get_uploaded_product_image(filename: str):
+    safe_name = os.path.basename(filename)
+    path = os.path.join(PRODUCT_UPLOADS_DIR, safe_name)
+    if not os.path.isfile(path):
+        raise HTTPException(404, "Image not found")
+    return FileResponse(path)
+
+
+@app.put("/api/products/{sku}")
+def upsert_product_card_endpoint(sku: str, payload: ProductCardUpsert, _: None = Depends(require_admin)):
+    normalized_sku = sku.strip()
+    if normalized_sku != payload.sku.strip():
+        raise HTTPException(400, "SKU in path and body must match")
+    upsert_product_card(payload)
+    return {"ok": True}
+
+
+@app.post("/api/products/image")
+async def upload_product_image(file: UploadFile = File(...), _: None = Depends(require_admin)):
+    os.makedirs(PRODUCT_UPLOADS_DIR, exist_ok=True)
+    if not (file.content_type or "").startswith("image/"):
+        raise HTTPException(400, "Можно загружать только изображения")
+
+    safe_name = _safe_product_upload_name(file.filename or "image.jpg")
+    path = os.path.join(PRODUCT_UPLOADS_DIR, safe_name)
+
+    with open(path, "wb") as out:
+        shutil.copyfileobj(file.file, out)
+
+    return {"ok": True, "imageUrl": _product_upload_public_url(safe_name), "filename": safe_name}
 
 
 @app.post("/api/leadteh/sync")

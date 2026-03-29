@@ -133,3 +133,33 @@ export async function seedProducts(authBasic) {
   });
   return await r.json();
 }
+
+export async function saveProductCard(authBasic, payload) {
+  const r = await request(`/api/products/${encodeURIComponent(payload.sku)}`, {
+    method: "PUT",
+    headers: {
+      Authorization: `Basic ${authBasic}`,
+      "Content-Type": "application/json",
+      ...ngrokHeaders(),
+    },
+    cache: "no-store",
+    body: JSON.stringify(payload),
+  });
+  return await r.json();
+}
+
+export async function uploadProductImage(authBasic, file) {
+  const body = new FormData();
+  body.append("file", file);
+  const r = await request("/api/products/image", {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${authBasic}`,
+      "ngrok-skip-browser-warning": "1",
+      Accept: "application/json",
+    },
+    cache: "no-store",
+    body,
+  });
+  return await r.json();
+}

@@ -1,5 +1,16 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { API_BASE, createOrder, getProducts, pushLeadteh, seedProducts, syncLeadteh, syncMoySklad, updateInventory } from "./api.js";
+import {
+  API_BASE,
+  createOrder,
+  getProducts,
+  pushLeadteh,
+  saveProductCard,
+  seedProducts,
+  syncLeadteh,
+  syncMoySklad,
+  updateInventory,
+  uploadProductImage,
+} from "./api.js";
 import { getInitData, getMessengerPlatform, getUser, initMessenger, openExternalLink } from "./telegram.js";
 
 function rub(v) {
@@ -13,6 +24,36 @@ function normalizePhoneForSend(value) {
   if (digits.length === 11 && digits.startsWith("7")) return `+${digits}`;
   if (digits.length === 10) return `+7${digits}`;
   return value;
+}
+
+function emptyAdminCardDraft() {
+  return {
+    sku: "",
+    name: "",
+    price: 0,
+    weight: "",
+    shelfLife: "",
+    description: "",
+    imageUrl: "",
+    badge: "",
+    sort: 0,
+    active: 1,
+  };
+}
+
+function productToAdminCardDraft(product) {
+  return {
+    sku: product?.sku || "",
+    name: product?.name || "",
+    price: Number(product?.price || 0),
+    weight: product?.weight || "",
+    shelfLife: product?.shelfLife || "",
+    description: product?.description || "",
+    imageUrl: product?.imageUrl || "",
+    badge: product?.badge || "",
+    sort: Number(product?.sort || 0),
+    active: product?.active === 0 ? 0 : 1,
+  };
 }
 
 export default function App() {
@@ -35,6 +76,11 @@ export default function App() {
   const [adminPushing, setAdminPushing] = useState(false);
   const [adminPushMsg, setAdminPushMsg] = useState("");
   const [adminSeeding, setAdminSeeding] = useState(false);
+  const [adminCardDraft, setAdminCardDraft] = useState(emptyAdminCardDraft);
+  const [adminCardSaving, setAdminCardSaving] = useState(false);
+  const [adminCardUploading, setAdminCardUploading] = useState(false);
+  const [adminCardMsg, setAdminCardMsg] = useState("");
+  const [adminCardMode, setAdminCardMode] = useState("edit");
   const [lastOrder, setLastOrder] = useState(null);
 
   const [name, setName] = useState("");
@@ -76,6 +122,14 @@ export default function App() {
     });
     setAdminStocks(stocks);
   }, [adminRoute, products]);
+
+  useEffect(() => {
+    if (!adminRoute || !adminAuth) return;
+    if (adminCardDraft.sku) return;
+    if (!products.length) return;
+    setAdminCardDraft(productToAdminCardDraft(products[0]));
+    setAdminCardMode("edit");
+  }, [adminRoute, adminAuth, products, adminCardDraft.sku]);
 
   const productMap = useMemo(() => {
     const map = {};
@@ -239,6 +293,65 @@ export default function App() {
     }
   }
 
+  function startCreateCard() {
+    setAdminCardMode("create");
+    setAdminCardMsg("");
+    setAdminCardDraft(emptyAdminCardDraft());
+  }
+
+  function startEditCard(product) {
+    setAdminCardMode("edit");
+    setAdminCardMsg("");
+    setAdminCardDraft(productToAdminCardDraft(product));
+  }
+
+  function updateAdminCardField(field, value) {
+    setAdminCardDraft((current) => ({ ...current, [field]: value }));
+  }
+
+  async function handleAdminImageUpload(file) {
+    if (!file || !adminAuth) return;
+    setAdminError("");
+    setAdminCardMsg("");
+    setAdminCardUploading(true);
+    try {
+      const res = await uploadProductImage(adminAuth, file);
+      setAdminCardDraft((current) => ({ ...current, imageUrl: res.imageUrl || "" }));
+      setAdminCardMsg("Картинка загружена.");
+    } catch (e) {
+      setAdminError(String(e?.message || e));
+    } finally {
+      setAdminCardUploading(false);
+    }
+  }
+
+  async function saveAdminCard() {
+    if (!adminAuth) return;
+    if (!adminCardDraft.sku.trim()) return setAdminError("Укажите SKU.");
+    if (!adminCardDraft.name.trim()) return setAdminError("Укажите название.");
+    setAdminError("");
+    setAdminCardMsg("");
+    setAdminCardSaving(true);
+    try {
+      const payload = {
+        ...adminCardDraft,
+        sku: adminCardDraft.sku.trim(),
+        name: adminCardDraft.name.trim(),
+        price: Number(adminCardDraft.price || 0),
+        sort: Number(adminCardDraft.sort || 0),
+        active: Number(adminCardDraft.active || 0),
+      };
+      await saveProductCard(adminAuth, payload);
+      await loadProducts();
+      setAdminCardMode("edit");
+      setAdminCardMsg("Карточка сохранена.");
+    } catch (e) {
+      setAdminError(String(e?.message || e));
+    } finally {
+      setAdminCardSaving(false);
+    }
+  }
+
   async function saveInventory() {
     setAdminError("");
     setAdminSaving(true);
@@ -342,10 +455,14 @@ export default function App() {
 
         {adminAuth && (
           <div className="box">
-            <div className="boxTitle">Остатки товаров</div>
+            <div className="boxTitle">Карточки и остатки</div>
             {adminError && <div className="error">{adminError}</div>}
             {adminSyncMsg && <div className="muted">{adminSyncMsg}</div>}
-            <div className="muted">Для МойСклад каталог, описание, фото и остатки подтягиваются в магазин через синхронизацию.</div>
+            {adminCardMsg && <div className="muted">{adminCardMsg}</div>}
+            <div className="muted">
+              Карточки теперь можно править прямо здесь. Остатки продолжают жить отдельно: МойСклад и Leadteh обновляют stock,
+              а локально сохраненные карточки не перетираются синком.
+            </div>
             <div className="adminActions">
               <button className="openBtn" onClick={syncFromMoySklad} disabled={adminMoySkladSyncing}>
                 {adminMoySkladSyncing ? "Синхронизация..." : "Синхронизировать из МойСклад"}
@@ -359,24 +476,145 @@ export default function App() {
               <button className="openBtn" onClick={seedFromTemplate} disabled={adminSeeding}>
                 {adminSeeding ? "Восстановление..." : "Восстановить карточки"}
               </button>
+              <button className="openBtn" onClick={startCreateCard}>
+                Добавить карточку
+              </button>
             </div>
             {adminPushMsg && <div className="muted">{adminPushMsg}</div>}
+
+            <div className="adminEditor">
+              <div className="adminEditorTop">
+                <div>
+                  <div className="boxTitle">{adminCardMode === "create" ? "Новая карточка" : "Редактирование карточки"}</div>
+                  <div className="muted">
+                    Сохраняется локальная карточка. Остатки дальше можно синхронизировать отдельно.
+                  </div>
+                </div>
+                {adminCardDraft.imageUrl && (
+                  <img className="adminPreview" src={adminCardDraft.imageUrl} alt={adminCardDraft.name || "preview"} />
+                )}
+              </div>
+
+              <div className="adminGrid">
+                <label className="field">
+                  <span>SKU</span>
+                  <input
+                    value={adminCardDraft.sku}
+                    onChange={(e) => updateAdminCardField("sku", e.target.value)}
+                    disabled={adminCardMode === "edit"}
+                  />
+                </label>
+                <label className="field">
+                  <span>Название</span>
+                  <input value={adminCardDraft.name} onChange={(e) => updateAdminCardField("name", e.target.value)} />
+                </label>
+                <label className="field">
+                  <span>Цена</span>
+                  <input
+                    type="number"
+                    min="0"
+                    value={adminCardDraft.price}
+                    onChange={(e) => updateAdminCardField("price", e.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  <span>Порядок</span>
+                  <input
+                    type="number"
+                    value={adminCardDraft.sort}
+                    onChange={(e) => updateAdminCardField("sort", e.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  <span>Вес</span>
+                  <input value={adminCardDraft.weight} onChange={(e) => updateAdminCardField("weight", e.target.value)} />
+                </label>
+                <label className="field">
+                  <span>Срок годности</span>
+                  <input
+                    value={adminCardDraft.shelfLife}
+                    onChange={(e) => updateAdminCardField("shelfLife", e.target.value)}
+                  />
+                </label>
+                <label className="field">
+                  <span>Бейдж</span>
+                  <input value={adminCardDraft.badge} onChange={(e) => updateAdminCardField("badge", e.target.value)} />
+                </label>
+                <label className="field">
+                  <span>Активность</span>
+                  <select
+                    value={String(adminCardDraft.active)}
+                    onChange={(e) => updateAdminCardField("active", Number(e.target.value))}
+                  >
+                    <option value="1">Показывать</option>
+                    <option value="0">Скрыть</option>
+                  </select>
+                </label>
+              </div>
+
+              <label className="field">
+                <span>Описание</span>
+                <textarea
+                  value={adminCardDraft.description}
+                  onChange={(e) => updateAdminCardField("description", e.target.value)}
+                />
+              </label>
+
+              <label className="field">
+                <span>URL картинки</span>
+                <input
+                  value={adminCardDraft.imageUrl}
+                  onChange={(e) => updateAdminCardField("imageUrl", e.target.value)}
+                />
+              </label>
+
+              <label className="field">
+                <span>Загрузить новую картинку</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => handleAdminImageUpload(e.target.files?.[0])}
+                />
+              </label>
+
+              <div className="adminActions">
+                <button className="payBtn adminSaveBtn" onClick={saveAdminCard} disabled={adminCardSaving || adminCardUploading}>
+                  {adminCardSaving ? "Сохраняем карточку..." : "Сохранить карточку"}
+                </button>
+                <button className="openBtn" onClick={() => startEditCard(products[0])} disabled={!products.length}>
+                  Сбросить форму
+                </button>
+              </div>
+              {adminCardUploading && <div className="muted">Загрузка картинки...</div>}
+            </div>
+
             <div className="adminList">
               {products.map((p) => (
                 <div className="adminRow" key={p.sku}>
-                  <div>
-                    <div className="adminName">{p.name}</div>
-                    <div className="muted">SKU: {p.sku}</div>
+                  <div className="adminRowMain">
+                    {p.imageUrl ? <img className="adminThumb" src={p.imageUrl} alt={p.name} /> : <div className="adminThumb adminThumb--empty" />}
+                    <div>
+                      <div className="adminName">{p.name}</div>
+                      <div className="muted">SKU: {p.sku}</div>
+                      <div className="muted">
+                        {rub(Number(p.price || 0))} · Остаток {p.stock ?? 0} · {p.catalogOverride ? "локальная карточка" : "внешняя карточка"}
+                      </div>
+                    </div>
                   </div>
-                  <input
-                    className="adminInput"
-                    type="number"
-                    min="0"
-                    value={adminStocks[p.sku] ?? 0}
-                    onChange={(e) =>
-                      setAdminStocks((s) => ({ ...s, [p.sku]: e.target.value }))
-                    }
-                  />
+                  <div className="adminRowSide">
+                    <input
+                      className="adminInput"
+                      type="number"
+                      min="0"
+                      value={adminStocks[p.sku] ?? 0}
+                      onChange={(e) =>
+                        setAdminStocks((s) => ({ ...s, [p.sku]: e.target.value }))
+                      }
+                    />
+                    <button className="openBtn" onClick={() => startEditCard(p)}>
+                      Редактировать
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>

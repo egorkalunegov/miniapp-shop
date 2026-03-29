@@ -271,6 +271,39 @@ body {
   background: #fff;
 }
 
+.adminRowMain {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.adminRowSide {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.adminThumb {
+  width: 56px;
+  height: 56px;
+  border-radius: 12px;
+  object-fit: cover;
+  border: 1px solid var(--stroke);
+  background: #f7f1ea;
+  flex: 0 0 auto;
+}
+
+.adminThumb--empty {
+  background: repeating-linear-gradient(
+    135deg,
+    #f5ede3,
+    #f5ede3 8px,
+    #fdf7f1 8px,
+    #fdf7f1 16px
+  );
+}
+
 .adminName {
   font-weight: 800;
 }
@@ -282,6 +315,42 @@ body {
   border-radius: 10px;
   padding: 8px 10px;
   font-size: 14px;
+}
+
+.adminEditor {
+  margin: 14px 0;
+  padding: 14px;
+  border: 1px solid var(--stroke);
+  border-radius: 16px;
+  background: #fffaf5;
+  display: grid;
+  gap: 12px;
+}
+
+.adminEditorTop {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.adminPreview {
+  width: 96px;
+  height: 96px;
+  border-radius: 16px;
+  object-fit: cover;
+  border: 1px solid var(--stroke);
+  background: #fff;
+}
+
+.adminGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+
+.adminSaveBtn {
+  max-width: 280px;
 }
 
 .openBtn {
@@ -427,6 +496,20 @@ textarea {
   .grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 12px;
+  }
+  .adminRow {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .adminRowSide {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .adminGrid {
+    grid-template-columns: 1fr;
+  }
+  .adminEditorTop {
+    flex-direction: column;
   }
   .media {
     height: 150px;
