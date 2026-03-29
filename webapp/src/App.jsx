@@ -106,13 +106,18 @@ export default function App() {
   const loadProducts = () =>
     getProducts()
       .then((rows) => {
-        setProducts(rows || []);
+        const nextRows = rows || [];
+        setProducts(nextRows);
         setProductsError("");
+        return nextRows;
       })
-      .catch((e) => setProductsError(String(e?.message || e)));
+      .catch((e) => {
+        setProductsError(String(e?.message || e));
+        throw e;
+      });
 
   useEffect(() => {
-    loadProducts();
+    loadProducts().catch(() => {});
   }, [adminRoute]);
 
   useEffect(() => {
@@ -309,6 +314,39 @@ export default function App() {
     setAdminCardDraft((current) => ({ ...current, [field]: value }));
   }
 
+  function buildAdminCardPayload(draft) {
+    return {
+      ...draft,
+      sku: String(draft?.sku || "").trim(),
+      name: String(draft?.name || "").trim(),
+      price: Number(draft?.price || 0),
+      sort: Number(draft?.sort || 0),
+      active: Number(draft?.active || 0),
+    };
+  }
+
+  async function persistAdminCard(draft, successMessage) {
+    if (!adminAuth) return false;
+    const payload = buildAdminCardPayload(draft);
+    if (!payload.sku) {
+      setAdminError("Укажите SKU.");
+      return false;
+    }
+    if (!payload.name) {
+      setAdminError("Укажите название.");
+      return false;
+    }
+
+    await saveProductCard(adminAuth, payload);
+    const rows = await loadProducts();
+    const savedProduct = (rows || []).find((item) => item.sku === payload.sku);
+    setAdminCardDraft(savedProduct ? productToAdminCardDraft(savedProduct) : payload);
+    setAdminCardMode("edit");
+    setAdminCardOpen(true);
+    setAdminCardMsg(successMessage);
+    return true;
+  }
+
   async function handleAdminImageUpload(file) {
     if (!file || !adminAuth) return;
     setAdminError("");
@@ -316,8 +354,22 @@ export default function App() {
     setAdminCardUploading(true);
     try {
       const res = await uploadProductImage(adminAuth, file);
-      setAdminCardDraft((current) => ({ ...current, imageUrl: res.imageUrl || "" }));
-      setAdminCardMsg("Картинка загружена.");
+      const nextDraft = {
+        ...adminCardDraft,
+        imageUrl: res.imageUrl || "",
+      };
+      setAdminCardDraft(nextDraft);
+
+      if (String(nextDraft.sku || "").trim() && String(nextDraft.name || "").trim()) {
+        setAdminCardSaving(true);
+        try {
+          await persistAdminCard(nextDraft, "Картинка загружена и карточка сохранена.");
+        } finally {
+          setAdminCardSaving(false);
+        }
+      } else {
+        setAdminCardMsg("Картинка загружена. Заполните SKU и название, затем сохраните карточку.");
+      }
     } catch (e) {
       setAdminError(String(e?.message || e));
     } finally {
@@ -327,25 +379,11 @@ export default function App() {
 
   async function saveAdminCard() {
     if (!adminAuth) return;
-    if (!adminCardDraft.sku.trim()) return setAdminError("Укажите SKU.");
-    if (!adminCardDraft.name.trim()) return setAdminError("Укажите название.");
     setAdminError("");
     setAdminCardMsg("");
     setAdminCardSaving(true);
     try {
-      const payload = {
-        ...adminCardDraft,
-        sku: adminCardDraft.sku.trim(),
-        name: adminCardDraft.name.trim(),
-        price: Number(adminCardDraft.price || 0),
-        sort: Number(adminCardDraft.sort || 0),
-        active: Number(adminCardDraft.active || 0),
-      };
-      await saveProductCard(adminAuth, payload);
-      await loadProducts();
-      setAdminCardMode("edit");
-      setAdminCardMsg("Карточка сохранена.");
-      setAdminCardOpen(true);
+      await persistAdminCard(adminCardDraft, "Карточка сохранена.");
     } catch (e) {
       setAdminError(String(e?.message || e));
     } finally {

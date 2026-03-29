@@ -320,6 +320,9 @@ def ensure_inventory_columns() -> None:
     add_col("moysklad_href", "TEXT", "''")
     add_col("moysklad_image_href", "TEXT", "''")
 
+    # Карточки теперь храним локально, а из внешних систем подтягиваем только остатки/активность.
+    cur.execute("UPDATE inventory SET catalog_override=1 WHERE COALESCE(catalog_override, 0) <> 1")
+
     con.commit()
     con.close()
 
@@ -843,7 +846,7 @@ def sync_leadteh_products() -> dict:
                 """
                 INSERT INTO inventory
                 (sku, name, stock, reserved, price, weight, shelf_life, description, image_url, badge, sort, active, catalog_override)
-                VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 1)
                 """,
                 (sku, name, stock, price, weight, shelf_life, description, image_url, badge, sort, active),
             )
@@ -1509,7 +1512,7 @@ def sync_moysklad_products() -> dict:
                     """
                     INSERT INTO inventory
                     (sku, name, stock, reserved, price, weight, shelf_life, description, image_url, badge, sort, active, catalog_override, moysklad_href, moysklad_image_href)
-                    VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+                    VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
                     """,
                     (
                         sku,
