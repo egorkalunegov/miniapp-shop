@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Request, HTTPException, Response, UploadFile, File, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, Field
 import secrets
@@ -69,6 +70,8 @@ if PRODAMUS_FORM_URL and not PRODAMUS_FORM_URL.endswith("/"):
 DB_PATH = os.path.join(os.path.dirname(__file__), "app.db")
 UPLOADS_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 PRODUCT_UPLOADS_DIR = os.path.join(UPLOADS_DIR, "products")
+FRONTEND_DIST_DIR = os.path.join(os.path.dirname(__file__), "webapp_dist")
+FRONTEND_INDEX_PATH = os.path.join(FRONTEND_DIST_DIR, "index.html")
 
 FIXED_PRODUCT_SORTS = {
     "GIFT_BOX_LOVED": 1,
@@ -1985,6 +1988,8 @@ def _startup():
 
 @app.get("/")
 def root():
+    if os.path.isfile(FRONTEND_INDEX_PATH):
+        return FileResponse(FRONTEND_INDEX_PATH)
     return {"ok": True, "hint": "Use /docs or /health"}
 
 
@@ -2469,3 +2474,7 @@ def push_products(_: None = Depends(require_admin)):
 def seed_products_endpoint(_: None = Depends(require_admin)):
     seed_products(insert_only=False)
     return {"ok": True}
+
+
+if os.path.isdir(FRONTEND_DIST_DIR):
+    app.mount("/", StaticFiles(directory=FRONTEND_DIST_DIR, html=True), name="frontend")
