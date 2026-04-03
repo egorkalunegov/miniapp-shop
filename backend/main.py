@@ -634,8 +634,7 @@ def get_product_name_map(skus: list[str]) -> dict[str, str]:
 
 
 def _product_upload_public_url(filename: str) -> str:
-    base = PUBLIC_BASE_URL.rstrip("/") if PUBLIC_BASE_URL else "http://127.0.0.1:8000"
-    return f"{base}/uploads/products/{filename}"
+    return f"/uploads/products/{filename}"
 
 
 def _safe_product_upload_name(filename: str) -> str:
@@ -643,6 +642,25 @@ def _safe_product_upload_name(filename: str) -> str:
     if ext not in (".jpg", ".jpeg", ".png", ".webp"):
         raise HTTPException(400, "Поддерживаются только .jpg, .jpeg, .png, .webp")
     return f"{uuid.uuid4().hex}{ext}"
+
+
+def _normalize_storefront_asset_url(value: Any) -> str:
+    url = str(value or "").strip()
+    if not url:
+        return ""
+    if url.startswith("/"):
+        return url
+
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return url
+
+    path = parsed.path or ""
+    if path.startswith("/uploads/products/") or path.startswith("/products/") or path.startswith("/assets/"):
+        return f"{path}?{parsed.query}" if parsed.query else path
+    if path.startswith("/api/moysklad/image"):
+        return f"{path}?{parsed.query}" if parsed.query else path
+    return url
 
 
 def upsert_product_card(payload: "ProductCardUpsert") -> None:
@@ -2419,7 +2437,12 @@ def get_products():
         """
     ).fetchall()
     con.close()
-    return [dict(r) for r in rows]
+    products = []
+    for row in rows:
+        item = dict(row)
+        item["imageUrl"] = _normalize_storefront_asset_url(item.get("imageUrl"))
+        products.append(item)
+    return products
 
 
 @app.get("/uploads/products/{filename}")
