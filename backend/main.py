@@ -1999,6 +1999,15 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def disable_client_cache(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
+
+
 @app.on_event("startup")
 def _startup():
     init_db()
