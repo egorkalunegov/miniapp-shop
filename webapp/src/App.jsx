@@ -713,9 +713,6 @@ export default function App() {
                   <div className="priceTag">{rub(p.price)}</div>
                 </div>
                 <div className="cardBody">
-                  {isMotiProduct && (
-                    <div className="infoStrip">Продажа по Ростову-на-Дону и ДНР</div>
-                  )}
                   <div className="cardTitle">{p.name}</div>
                   <div className="chips">
                     {p.weight && <span className="chip">{p.weight}</span>}
@@ -759,12 +756,6 @@ export default function App() {
               К ТОВАРАМ
             </button>
           </div>
-
-          {hasMotiInCart && (
-            <div className="warningBanner">
-              Продажа моти осуществляется только по Ростову-на-Дону и ДНР
-            </div>
-          )}
 
           <div className="box">
             <div className="boxTitle">Корзина</div>
@@ -976,9 +967,6 @@ export default function App() {
             <button className="closeBtn" onClick={() => setActiveSku("")}>✕</button>
             <img className="modalImg" src={activeProduct.imageUrl} alt={activeProduct.name} />
             <div className="modalBody">
-              {activeProduct.sku === "MOTI_Coockies" && (
-                <div className="infoStrip">Продажа по Ростову-на-Дону и ДНР</div>
-              )}
               <div className="modalTitle">{activeProduct.name}</div>
               <div className="modalMeta">
                 {activeProduct.weight && <span className="chip">{activeProduct.weight}</span>}
